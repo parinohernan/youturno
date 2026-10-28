@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { today } from "@/lib/dates";
+import { strings } from "@/lib/strings";
 
 interface Props {
   onClose: () => void;
@@ -45,7 +46,7 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
     .reduce((sum, s) => sum + s.duration, 0);
 
   const handleSubmit = async (allowConflict = false) => {
-    if (!clientId) { setError("Please select a client"); return; }
+    if (!clientId) { setError("Elige un cliente"); return; }
     setSaving(true);
     setConflicts(null);
     try {
@@ -74,38 +75,38 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>New Booking</DialogTitle>
+          <DialogTitle>Nuevo turno</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Client *</Label>
+              <Label>Cliente *</Label>
               <select className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={clientId} onChange={(e) => setClientId((e.target as HTMLSelectElement).value)}>
-                <option value="">Select client...</option>
+                <option value="">Elegir cliente...</option>
                 {clientLookup.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
             <div className="space-y-1.5">
-              <Label>Staff</Label>
+              <Label>Equipo</Label>
               <select className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={staffId} onChange={(e) => { setStaffId((e.target as HTMLSelectElement).value); setConflicts(null); }}>
-                <option value="">Unassigned</option>
+                <option value="">Sin asignar</option>
                 {staffLookup.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Date</Label>
+              <Label>Fecha</Label>
               <Input type="date" value={date} onChange={(e) => { setDate((e.target as HTMLInputElement).value); setConflicts(null); }} />
             </div>
             <div className="space-y-1.5">
-              <Label>Start Time</Label>
+              <Label>Hora de inicio</Label>
               <Input type="time" value={startTime} onChange={(e) => { setStartTime((e.target as HTMLInputElement).value); setConflicts(null); }} />
             </div>
           </div>
 
           <div className="space-y-1.5">
-            <Label>Services</Label>
+            <Label>Servicios</Label>
             <div className="flex flex-wrap gap-2">
               {services.filter((s) => s.active).map((svc) => (
                 <button
@@ -132,8 +133,8 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
           </div>
 
           <div className="space-y-1.5">
-            <Label>Notes</Label>
-            <Textarea rows={3} placeholder="Special requests, preferences..." value={notes} onChange={(e) => setNotes((e.target as HTMLTextAreaElement).value)} />
+            <Label>Notas</Label>
+            <Textarea rows={3} placeholder="Pedidos especiales, preferencias..." value={notes} onChange={(e) => setNotes((e.target as HTMLTextAreaElement).value)} />
           </div>
         </div>
         {conflicts && (
@@ -141,26 +142,26 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
             <TriangleAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600" aria-hidden="true" />
             <div className="space-y-1">
               <p className="font-medium">
-                {staffLookup.find((s) => String(s.id) === staffId)?.name ?? "That staff member"} is not free then.
+                {staffLookup.find((s) => String(s.id) === staffId)?.name ?? "Este integrante del equipo"} no está disponible en ese horario.
               </p>
               <ul className="text-muted-foreground">
                 {conflicts.map((c) => (
                   <li key={`${c.start_time}-${c.label}`}>{describeConflict(c)}</li>
                 ))}
               </ul>
-              <p className="text-muted-foreground">Pick another time or staff member, or book it anyway.</p>
+              <p className="text-muted-foreground">Elige otro horario o integrante del equipo, o agéndalo de todas formas.</p>
             </div>
           </div>
         )}
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button variant="outline" onClick={onClose}>Cancelar</Button>
           {conflicts && (
             <Button variant="outline" disabled={saving} onClick={() => handleSubmit(true)}>
-              Book anyway
+              Agendar de todas formas
             </Button>
           )}
           <Button disabled={saving} onClick={() => handleSubmit()}>
-            {saving ? "Booking..." : "Create Booking"}
+            {saving ? strings.saving : "Crear turno"}
           </Button>
         </DialogFooter>
       </DialogContent>

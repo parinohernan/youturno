@@ -10,6 +10,7 @@ import { CreateAppointment } from "./create-appointment";
 import { cn } from "@/lib/utils";
 import { packLanes } from "@/lib/overlap";
 import { parseDate, shiftDate, today } from "@/lib/dates";
+import { formatDate, formatHour } from "@/lib/format";
 import { calendarSlotMinutes, formatCalendarTime } from "@/lib/calendar-slot";
 import { conflictsFrom, describeConflict, type Conflict } from "@/lib/conflicts";
 import { downloadDaySheet } from "@/lib/day-sheet";
@@ -50,13 +51,6 @@ function layOutColumn(
 function laneStyle(lane: number, lanes: number) {
   const width = 100 / lanes;
   return { left: `calc(${lane * width}% + 4px)`, width: `calc(${width}% - 8px)` };
-}
-
-function formatHour(h: number): string {
-  if (h === 0) return "12 AM";
-  if (h < 12) return `${h} AM`;
-  if (h === 12) return "12 PM";
-  return `${h - 12} PM`;
 }
 
 export function CalendarView() {
@@ -133,29 +127,29 @@ export function CalendarView() {
     <div className="flex h-full min-w-0 flex-col gap-4 p-4 sm:p-6">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div className="flex w-full items-center justify-between gap-3 sm:w-auto">
-          <h1 className="text-2xl font-bold tracking-tight">Calendar</h1>
-          <Button variant="outline" size="sm" className="h-11" onClick={() => chooseDate(todayStr)}>Today</Button>
+          <h1 className="text-2xl font-bold tracking-tight">Agenda</h1>
+          <Button variant="outline" size="sm" className="h-11" onClick={() => chooseDate(todayStr)}>Hoy</Button>
         </div>
         <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
-          <Button variant="outline" size="icon" className="h-11 w-11 shrink-0" aria-label="Previous day" onClick={() => shiftDay(-1)}>
+          <Button variant="outline" size="icon" className="h-11 w-11 shrink-0" aria-label="Día anterior" onClick={() => shiftDay(-1)}>
             <ChevronLeft className="h-4 w-4" />
           </Button>
           <span className="min-w-0 flex-1 text-center text-sm font-semibold sm:min-w-[200px]" aria-live="polite" aria-atomic="true">
-            {dateObj.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })}
+            {formatDate(dateObj, "long")}
           </span>
-          <Button variant="outline" size="icon" className="h-11 w-11 shrink-0" aria-label="Next day" onClick={() => shiftDay(1)}>
+          <Button variant="outline" size="icon" className="h-11 w-11 shrink-0" aria-label="Día siguiente" onClick={() => shiftDay(1)}>
             <ChevronRight className="h-4 w-4" />
           </Button>
         </div>
         <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
           <Button variant="outline" size="sm" className="h-11 w-full sm:w-auto" aria-expanded={showBlockForm} aria-controls="calendar-block-time" onClick={() => { setShowBlockForm(!showBlockForm); setBlockConflicts(null); }}>
-            <Ban className="h-3.5 w-3.5" /> Block Time
+            <Ban className="h-3.5 w-3.5" /> Bloquear horario
           </Button>
           <Button variant="outline" size="sm" className="h-11 w-full sm:w-auto" onClick={() => downloadDaySheet(calendarDate, calendarAppointments, calendarBlocked)}>
-            <Download className="h-3.5 w-3.5" /> Day Sheet
+            <Download className="h-3.5 w-3.5" /> Planilla del día
           </Button>
           <Button size="sm" className="col-span-2 h-11 w-full sm:w-auto" onClick={openBlankBooking}>
-            <Plus className="h-3.5 w-3.5" /> New Booking
+            <Plus className="h-3.5 w-3.5" /> Nuevo turno
           </Button>
         </div>
       </div>
@@ -164,38 +158,38 @@ export function CalendarView() {
         <Card id="calendar-block-time" className="shrink-0">
           <CardContent className="grid grid-cols-2 items-end gap-3 p-4 sm:grid-cols-4 xl:flex xl:flex-wrap">
             <div className="col-span-2 min-w-0 space-y-1 xl:w-48">
-              <Label htmlFor="block-staff" className="text-xs">Staff</Label>
+              <Label htmlFor="block-staff" className="text-xs">Equipo</Label>
               <select id="block-staff" className="h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={blockStaff} onChange={(e) => { setBlockStaff((e.target as HTMLSelectElement).value); clearBlockConflicts(); }}>
-                <option value="">Select staff...</option>
+                <option value="">Elegir integrante...</option>
                 {staffLookup.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </div>
             <div className="min-w-0 space-y-1 xl:w-28">
-              <Label htmlFor="block-start" className="text-xs">Start</Label>
+              <Label htmlFor="block-start" className="text-xs">Inicio</Label>
               <Input id="block-start" type="time" className="h-11 w-full min-w-0" value={blockStart} onChange={(e) => { setBlockStart((e.target as HTMLInputElement).value); clearBlockConflicts(); }} />
             </div>
             <div className="min-w-0 space-y-1 xl:w-28">
-              <Label htmlFor="block-end" className="text-xs">End</Label>
+              <Label htmlFor="block-end" className="text-xs">Fin</Label>
               <Input id="block-end" type="time" className="h-11 w-full min-w-0" value={blockEnd} onChange={(e) => { setBlockEnd((e.target as HTMLInputElement).value); clearBlockConflicts(); }} />
             </div>
             <div className="col-span-2 min-w-0 space-y-1 xl:flex-1">
-              <Label htmlFor="block-reason" className="text-xs">Reason</Label>
-              <Input id="block-reason" className="h-11" placeholder="e.g. Lunch break" value={blockReason} onChange={(e) => setBlockReason((e.target as HTMLInputElement).value)} />
+              <Label htmlFor="block-reason" className="text-xs">Motivo</Label>
+              <Input id="block-reason" className="h-11" placeholder="ej. Almuerzo" value={blockReason} onChange={(e) => setBlockReason((e.target as HTMLInputElement).value)} />
             </div>
             {blockConflicts && (
               <div role="alert" className="col-span-2 flex min-w-0 gap-2.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm sm:col-span-4 xl:basis-full">
                 <TriangleAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600" aria-hidden="true" />
                 <div className="min-w-0 space-y-1">
-                  <p className="font-medium">{staffLookup.find((s) => String(s.id) === blockStaff)?.name ?? "That staff member"} is not free then.</p>
+                  <p className="font-medium">{staffLookup.find((s) => String(s.id) === blockStaff)?.name ?? "Este integrante del equipo"} no está disponible en ese horario.</p>
                   <ul className="text-muted-foreground">
                     {blockConflicts.map((conflict, index) => <li key={index}>{describeConflict(conflict)}</li>)}
                   </ul>
-                  <p className="text-muted-foreground">Choose another time or staff member, or block it anyway.</p>
+                  <p className="text-muted-foreground">Elige otro horario o integrante del equipo, o bloquéalo de todas formas.</p>
                 </div>
               </div>
             )}
-            {blockConflicts && <Button type="button" variant="outline" size="sm" className="col-span-2 h-11 sm:col-span-1" onClick={() => handleAddBlock(true)}>Block anyway</Button>}
-            <Button size="sm" className="col-span-2 h-11 sm:col-span-1" onClick={() => handleAddBlock()}>Add Block</Button>
+            {blockConflicts && <Button type="button" variant="outline" size="sm" className="col-span-2 h-11 sm:col-span-1" onClick={() => handleAddBlock(true)}>Bloquear de todas formas</Button>}
+            <Button size="sm" className="col-span-2 h-11 sm:col-span-1" onClick={() => handleAddBlock()}>Agregar bloqueo</Button>
           </CardContent>
         </Card>
       )}
@@ -209,7 +203,7 @@ export function CalendarView() {
         />
       )}
 
-      <div className="flex min-h-80 min-w-0 flex-1 overflow-auto rounded-lg border bg-card" role="region" aria-label="Daily staff schedule" tabIndex={0}>
+      <div className="flex min-h-80 min-w-0 flex-1 overflow-auto rounded-lg border bg-card" role="region" aria-label="Agenda diaria del equipo" tabIndex={0}>
         {/* Time gutter */}
         <div className="w-16 flex-shrink-0 border-r bg-muted/30 pt-10">
           {HOURS.map((h) => (
@@ -233,7 +227,7 @@ export function CalendarView() {
                 <div
                   className="relative shrink-0 cursor-crosshair"
                   style={{ height: totalHeight }}
-                  aria-label={`${member.name}'s schedule; click empty time to create a booking`}
+                  aria-label={`Horario de ${member.name}; haz clic en un horario libre para crear un turno`}
                   onClick={(event) => {
                     if ((event.target as HTMLElement).closest("[data-calendar-item]")) return;
                     openSlotBooking(member.id, event.currentTarget, event.clientY);
@@ -262,7 +256,7 @@ export function CalendarView() {
                           className="absolute z-10 flex items-center justify-between rounded bg-muted/60 px-2 text-xs text-muted-foreground"
                           style={{ ...lane, top, height: Math.max(height, 20) }}
                         >
-                          <span className="truncate">{block.reason || "Blocked"}</span>
+                          <span className="truncate">{block.reason || "Bloqueo"}</span>
                           <button
                             className="flex-shrink-0 rounded p-0.5 hover:bg-muted"
                             onClick={(e) => { e.stopPropagation(); deleteBlockedSlot(block.id); }}
@@ -312,12 +306,12 @@ export function CalendarView() {
               <div className="flex min-w-[180px] flex-1 flex-col border-r last:border-r-0">
                 <div className="flex items-center justify-center gap-2 border-b bg-muted/20 px-3 py-2.5">
                   <span className="inline-block h-3 w-3 rounded-full bg-muted-foreground/40" />
-                  <span className="text-sm font-medium text-muted-foreground">Unassigned</span>
+                  <span className="text-sm font-medium text-muted-foreground">Sin asignar</span>
                 </div>
                 <div
                   className="relative shrink-0 cursor-crosshair"
                   style={{ height: totalHeight }}
-                  aria-label="Unassigned schedule; click empty time to create a booking"
+                  aria-label="Agenda sin asignar; haz clic en un horario libre para crear un turno"
                   onClick={(event) => {
                     if ((event.target as HTMLElement).closest("[data-calendar-item]")) return;
                     openSlotBooking(null, event.currentTarget, event.clientY);

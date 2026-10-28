@@ -10,13 +10,13 @@ import { cn } from "@/lib/utils";
 import type { View } from "../types";
 
 const navItems: { view: View; path: string; label: string; icon: typeof LayoutDashboard }[] = [
-  { view: "dashboard", path: "/", label: "Dashboard", icon: LayoutDashboard },
-  { view: "calendar", path: "/calendar", label: "Calendar", icon: CalendarDays },
-  { view: "appointments", path: "/appointments", label: "Appointments", icon: Clock },
-  { view: "clients", path: "/clients", label: "Clients", icon: Users },
-  { view: "staff", path: "/staff", label: "Staff", icon: UserCog },
-  { view: "services", path: "/services", label: "Services", icon: Sparkles },
-  { view: "products", path: "/products", label: "Products", icon: Package },
+  { view: "dashboard", path: "/", label: "Panel de inicio", icon: LayoutDashboard },
+  { view: "calendar", path: "/calendar", label: "Agenda", icon: CalendarDays },
+  { view: "appointments", path: "/appointments", label: "Turnos", icon: Clock },
+  { view: "clients", path: "/clients", label: "Clientes", icon: Users },
+  { view: "staff", path: "/staff", label: "Equipo", icon: UserCog },
+  { view: "services", path: "/services", label: "Servicios", icon: Sparkles },
+  { view: "products", path: "/products", label: "Productos", icon: Package },
 ];
 
 function SidebarContent({ currentView, onNavigate }: { currentView: View; onNavigate?: () => void }) {
@@ -28,11 +28,11 @@ function SidebarContent({ currentView, onNavigate }: { currentView: View; onNavi
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
           <Scissors className="h-4 w-4" />
         </div>
-        <span className="text-base font-semibold text-sidebar-foreground">Salon Manager</span>
+        <span className="text-base font-semibold text-sidebar-foreground">Gestor de salón</span>
       </div>
       <Separator />
-      <nav aria-label="Main navigation" className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-3">
-        <p className="mb-2 px-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">Menu</p>
+      <nav aria-label="Navegación principal" className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-3">
+        <p className="mb-2 px-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">Menú</p>
         {navItems.map((item) => (
           <button
             key={item.view}
@@ -63,11 +63,11 @@ function SidebarContent({ currentView, onNavigate }: { currentView: View; onNavi
       <div className="flex items-center justify-around px-4 py-4">
         <div className="text-center">
           <div className="text-lg font-bold text-sidebar-foreground">{stats.today_appointments}</div>
-          <div className="text-xs text-muted-foreground">Today</div>
+          <div className="text-xs text-muted-foreground">Hoy</div>
         </div>
         <div className="text-center">
           <div className="text-lg font-bold text-sidebar-foreground">{stats.upcoming_appointments}</div>
-          <div className="text-xs text-muted-foreground">Upcoming</div>
+          <div className="text-xs text-muted-foreground">Próximos</div>
         </div>
       </div>
     </div>
@@ -92,7 +92,7 @@ export function Sidebar({ currentView }: { currentView: View }) {
 
   if (embedded) {
     const icons = ["home", "calendar-days", "clock", "users", "users", "sparkles", "package"];
-    return <AppNav title="Salon" icon="calendar-days" active={currentView}
+    return <AppNav title="Salón" icon="calendar-days" active={currentView}
       groups={[{ items: navItems.map((item, index) => ({
         id: item.view, label: item.label, href: item.path, icon: icons[index],
         home: item.view === "dashboard",
@@ -111,17 +111,17 @@ export function Sidebar({ currentView }: { currentView: View }) {
       <header className="flex shrink-0 items-center justify-between gap-3 border-b bg-sidebar px-4 py-2 md:hidden">
         <span className="flex items-center gap-2 text-sm font-semibold">
           <Scissors className="h-4 w-4 text-primary" />
-          Salon Manager
+          Gestor de salón
         </span>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
-            <Button variant="outline" className="min-h-11" aria-label="Open navigation menu">
+            <Button variant="outline" className="min-h-11" aria-label="Abrir menú de navegación">
               <Menu className="h-4 w-4" />
-              Menu
+              Menú
             </Button>
           </DialogTrigger>
           <DialogContent aria-describedby={undefined} className="left-0 top-0 flex h-dvh w-80 max-w-[calc(100%-2rem)] translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:rounded-none [&>button]:flex [&>button]:h-11 [&>button]:w-11 [&>button]:items-center [&>button]:justify-center [&>button]:right-2 [&>button]:top-3">
-            <DialogTitle className="sr-only">Navigation menu</DialogTitle>
+            <DialogTitle className="sr-only">Menú de navegación</DialogTitle>
             <SidebarContent currentView={currentView} onNavigate={() => setOpen(false)} />
           </DialogContent>
         </Dialog>

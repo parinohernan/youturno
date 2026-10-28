@@ -59,7 +59,7 @@ export function App() {
         <Sidebar currentView={view} />
         <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-background">
           {appState.loading ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground">Loading...</div>
+            <div className="flex h-full items-center justify-center text-muted-foreground">Cargando...</div>
           ) : (
             renderMain()
           )}

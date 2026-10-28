@@ -45,12 +45,12 @@ export function AppointmentDetail() {
     <div className="space-y-6 p-6">
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="sm" onClick={() => navigate("/appointments")}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> Back
+          <ArrowLeft className="mr-1 h-4 w-4" /> Volver
         </Button>
         <h1 className="flex-1 text-2xl font-bold">{apt.identifier}</h1>
         <StatusBadge status={apt.status} />
         <Button variant="destructive" size="sm" onClick={() => deleteAppointment(apt.id)}>
-          <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
+          <Trash2 className="mr-1 h-3.5 w-3.5" /> Eliminar
         </Button>
       </div>
 
@@ -58,17 +58,17 @@ export function AppointmentDetail() {
         <div className="space-y-6 lg:col-span-2">
           <Card>
             <CardHeader>
-              <CardTitle>Booking Details</CardTitle>
+              <CardTitle>Detalles del turno</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <Label className="flex items-center gap-1.5 text-xs text-muted-foreground"><Clock className="h-3 w-3" /> Date & Time</Label>
-                  <p className="text-sm font-medium">{apt.scheduled_date} at {apt.start_time} - {apt.end_time}</p>
-                  <Button variant="outline" size="sm" className="px-2" onClick={() => setRescheduling(true)}>Reschedule</Button>
+                  <Label className="flex items-center gap-1.5 text-xs text-muted-foreground"><Clock className="h-3 w-3" /> Fecha y hora</Label>
+                  <p className="text-sm font-medium">{apt.scheduled_date} a las {apt.start_time} - {apt.end_time}</p>
+                  <Button variant="outline" size="sm" className="px-2" onClick={() => setRescheduling(true)}>Reprogramar</Button>
                 </div>
                 <div className="space-y-1">
-                  <Label className="flex items-center gap-1.5 text-xs text-muted-foreground"><User className="h-3 w-3" /> Client</Label>
+                  <Label className="flex items-center gap-1.5 text-xs text-muted-foreground"><User className="h-3 w-3" /> Cliente</Label>
                   <button className="text-sm font-medium text-primary hover:underline" onClick={() => navigate(`/clients/${apt.client_id}`)}>
                     {apt.client_name}
                   </button>
@@ -78,21 +78,21 @@ export function AppointmentDetail() {
               <Separator />
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Staff</Label>
+                  <Label className="text-xs text-muted-foreground">Equipo</Label>
                   <select className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={apt.staff_id || ""} onChange={(e) => handleStaffChange((e.target as HTMLSelectElement).value)}>
-                    <option value="">Unassigned</option>
+                    <option value="">Sin asignar</option>
                     {staffLookup.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Status</Label>
+                  <Label className="text-xs text-muted-foreground">Estado</Label>
                   <select className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={apt.status} onChange={(e) => handleStatusChange((e.target as HTMLSelectElement).value)}>
-                    <option value="booked">Booked</option>
-                    <option value="confirmed">Confirmed</option>
-                    <option value="in_progress">In Progress</option>
-                    <option value="completed">Completed</option>
-                    <option value="cancelled">Cancelled</option>
-                    <option value="no_show">No Show</option>
+                    <option value="booked">Reservado</option>
+                    <option value="confirmed">Confirmado</option>
+                    <option value="in_progress">En curso</option>
+                    <option value="completed">Completado</option>
+                    <option value="cancelled">Cancelado</option>
+                    <option value="no_show">No asistió</option>
                   </select>
                 </div>
               </div>
@@ -102,7 +102,7 @@ export function AppointmentDetail() {
               </div>
               {apt.notes && (
                 <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Notes</Label>
+                  <Label className="text-xs text-muted-foreground">Notas</Label>
                   <p className="text-sm">{apt.notes}</p>
                 </div>
               )}
@@ -113,18 +113,18 @@ export function AppointmentDetail() {
         <div className="space-y-6">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Services</CardTitle>
+              <CardTitle className="text-base">Servicios</CardTitle>
             </CardHeader>
             <CardContent>
               {(!apt.appointment_services || apt.appointment_services.length === 0) ? (
-                <p className="text-sm text-muted-foreground">No services added</p>
+                <p className="text-sm text-muted-foreground">Aún no hay servicios</p>
               ) : (
                 <div className="space-y-2">
                   {apt.appointment_services.map((svc) => (
                     <div key={svc.id} className="flex items-center justify-between text-sm">
-                      <span>{svc.service_name || `Service #${svc.service_id}`}</span>
+                      <span>{svc.service_name || `Servicio #${svc.service_id}`}</span>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs text-muted-foreground">{svc.duration}min</span>
+                        <span className="text-xs text-muted-foreground">{svc.duration} min</span>
                         <span className="font-medium">${svc.price.toFixed(2)}</span>
                       </div>
                     </div>
@@ -136,12 +136,12 @@ export function AppointmentDetail() {
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Activity</CardTitle>
+              <CardTitle className="text-base">Actividad</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <div className="flex gap-2">
                 <Input
-                  placeholder="Add a note..."
+                  placeholder="Agregar una nota..."
                   value={noteText}
                   onChange={(e) => setNoteText((e.target as HTMLInputElement).value)}
                   onKeyDown={(e) => e.key === "Enter" && handleAddNote()}
@@ -151,7 +151,7 @@ export function AppointmentDetail() {
                 </Button>
               </div>
               {(!apt.appointment_notes || apt.appointment_notes.length === 0) ? (
-                <p className="text-sm text-muted-foreground">No notes yet</p>
+                <p className="text-sm text-muted-foreground">Aún no hay notas</p>
               ) : (
                 <div className="space-y-2">
                   {apt.appointment_notes.map((note) => (
