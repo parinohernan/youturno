@@ -89,7 +89,7 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
             <div className="space-y-1.5">
               <Label>Equipo</Label>
               <select className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={staffId} onChange={(e) => { setStaffId((e.target as HTMLSelectElement).value); setConflicts(null); }}>
-                <option value="">Sin asignar</option>
+                <option value="">{strings.unassigned}</option>
                 {staffLookup.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </div>
@@ -142,7 +142,7 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
             <TriangleAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600" aria-hidden="true" />
             <div className="space-y-1">
               <p className="font-medium">
-                {staffLookup.find((s) => String(s.id) === staffId)?.name ?? "Este integrante del equipo"} no está disponible en ese horario.
+                {staffLookup.find((s) => String(s.id) === staffId)?.name ?? strings.staffFallback} {strings.unavailableThen}
               </p>
               <ul className="text-muted-foreground">
                 {conflicts.map((c) => (

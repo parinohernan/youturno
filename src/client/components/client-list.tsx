@@ -15,9 +15,9 @@ export function ClientList() {
   return (
     <div className="space-y-4 p-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight">Clients</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Clientes</h1>
         <Button size="sm" onClick={() => setShowCreate(true)}>
-          <Plus className="mr-1 h-3.5 w-3.5" /> Add Client
+          <Plus className="mr-1 h-3.5 w-3.5" /> Agregar cliente
         </Button>
       </div>
 
@@ -25,7 +25,7 @@ export function ClientList() {
 
       <div className="relative">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input className="pl-9" placeholder="Search clients..." value={clientsSearch} onInput={(e) => setClientsSearch((e.target as HTMLInputElement).value)} />
+        <Input className="pl-9" placeholder="Buscar clientes..." value={clientsSearch} onInput={(e) => setClientsSearch((e.target as HTMLInputElement).value)} />
       </div>
 
       <Card>
@@ -33,16 +33,16 @@ export function ClientList() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead className="w-44">Email</TableHead>
-                <TableHead className="w-28">Phone</TableHead>
-                <TableHead className="w-24 text-center">Visits</TableHead>
+                <TableHead>Nombre</TableHead>
+                <TableHead className="w-44">Correo electrónico</TableHead>
+                <TableHead className="w-28">Teléfono</TableHead>
+                <TableHead className="w-24 text-center">Visitas</TableHead>
                 <TableHead className="w-10" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {clients.length === 0 && (
-                <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">No clients found</TableCell></TableRow>
+                <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">No se encontraron clientes</TableCell></TableRow>
               )}
               {clients.map((c) => (
                 <TableRow key={c.id} className="cursor-pointer" onClick={() => navigate(`/clients/${c.id}`)}>

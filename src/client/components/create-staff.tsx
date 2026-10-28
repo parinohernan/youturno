@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { strings } from "@/lib/strings";
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#ef4444", "#14b8a6", "#f97316"];
 
@@ -17,7 +18,7 @@ export function CreateStaff({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async () => {
-    if (!name.trim()) { setError("Name is required"); return; }
+    if (!name.trim()) { setError(strings.nameRequired); return; }
     setSaving(true);
     try {
       await addStaff({ name: name.trim(), email, phone, title, color });
@@ -33,24 +34,24 @@ export function CreateStaff({ onClose }: { onClose: () => void }) {
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Add Staff Member</DialogTitle>
+          <DialogTitle>Agregar integrante</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label>Name *</Label>
-            <Input value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} placeholder="Full name" />
+            <Label>Nombre *</Label>
+            <Input value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} placeholder="Nombre completo" />
           </div>
           <div className="space-y-1.5">
-            <Label>Title / Role</Label>
-            <Input value={title} onChange={(e) => setTitle((e.target as HTMLInputElement).value)} placeholder="e.g. Senior Stylist" />
+            <Label>Puesto / Rol</Label>
+            <Input value={title} onChange={(e) => setTitle((e.target as HTMLInputElement).value)} placeholder="ej. Estilista senior" />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Email</Label>
+              <Label>Correo electrónico</Label>
               <Input type="email" value={email} onChange={(e) => setEmail((e.target as HTMLInputElement).value)} />
             </div>
             <div className="space-y-1.5">
-              <Label>Phone</Label>
+              <Label>Teléfono</Label>
               <Input value={phone} onChange={(e) => setPhone((e.target as HTMLInputElement).value)} />
             </div>
           </div>
@@ -69,8 +70,8 @@ export function CreateStaff({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={saving} onClick={handleSubmit}>{saving ? "Saving..." : "Add Staff"}</Button>
+          <Button variant="outline" onClick={onClose}>Cancelar</Button>
+          <Button disabled={saving} onClick={handleSubmit}>{saving ? strings.saving : "Agregar integrante"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

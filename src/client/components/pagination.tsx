@@ -15,7 +15,7 @@ export function Pagination({ pag, setPage }: Props) {
       <Button variant="outline" size="icon" className="h-8 w-8" disabled={pag.page <= 1} onClick={() => setPage(pag.page - 1)}>
         <ChevronLeft className="h-4 w-4" />
       </Button>
-      <span className="text-sm text-muted-foreground">Page {pag.page} of {totalPages}</span>
+      <span className="text-sm text-muted-foreground">Página {pag.page} de {totalPages}</span>
       <Button variant="outline" size="icon" className="h-8 w-8" disabled={pag.page >= totalPages} onClick={() => setPage(pag.page + 1)}>
         <ChevronRight className="h-4 w-4" />
       </Button>

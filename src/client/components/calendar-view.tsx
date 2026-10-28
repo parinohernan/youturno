@@ -13,6 +13,7 @@ import { parseDate, shiftDate, today } from "@/lib/dates";
 import { formatDate, formatHour } from "@/lib/format";
 import { calendarSlotMinutes, formatCalendarTime } from "@/lib/calendar-slot";
 import { conflictsFrom, describeConflict, type Conflict } from "@/lib/conflicts";
+import { strings } from "@/lib/strings";
 import { downloadDaySheet } from "@/lib/day-sheet";
 
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 7); // 7 AM to 8 PM
@@ -180,7 +181,7 @@ export function CalendarView() {
               <div role="alert" className="col-span-2 flex min-w-0 gap-2.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm sm:col-span-4 xl:basis-full">
                 <TriangleAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600" aria-hidden="true" />
                 <div className="min-w-0 space-y-1">
-                  <p className="font-medium">{staffLookup.find((s) => String(s.id) === blockStaff)?.name ?? "Este integrante del equipo"} no está disponible en ese horario.</p>
+                  <p className="font-medium">{staffLookup.find((s) => String(s.id) === blockStaff)?.name ?? strings.staffFallback} {strings.unavailableThen}</p>
                   <ul className="text-muted-foreground">
                     {blockConflicts.map((conflict, index) => <li key={index}>{describeConflict(conflict)}</li>)}
                   </ul>
@@ -306,7 +307,7 @@ export function CalendarView() {
               <div className="flex min-w-[180px] flex-1 flex-col border-r last:border-r-0">
                 <div className="flex items-center justify-center gap-2 border-b bg-muted/20 px-3 py-2.5">
                   <span className="inline-block h-3 w-3 rounded-full bg-muted-foreground/40" />
-                  <span className="text-sm font-medium text-muted-foreground">Sin asignar</span>
+                  <span className="text-sm font-medium text-muted-foreground">{strings.unassigned}</span>
                 </div>
                 <div
                   className="relative shrink-0 cursor-crosshair"

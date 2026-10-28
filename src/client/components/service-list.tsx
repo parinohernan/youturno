@@ -16,9 +16,9 @@ export function ServiceList() {
   return (
     <div className="space-y-4 p-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight">Services</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Servicios</h1>
         <Button size="sm" onClick={() => setShowCreate(true)}>
-          <Plus className="mr-1 h-3.5 w-3.5" /> Add Service
+          <Plus className="mr-1 h-3.5 w-3.5" /> Agregar servicio
         </Button>
       </div>
 
@@ -30,17 +30,17 @@ export function ServiceList() {
             <TableHeader>
               <TableRow>
                 <TableHead className="w-8" />
-                <TableHead>Name</TableHead>
-                <TableHead className="w-28">Category</TableHead>
-                <TableHead className="w-24 text-center">Duration</TableHead>
-                <TableHead className="w-20 text-right">Price</TableHead>
-                <TableHead className="w-20">Status</TableHead>
+                <TableHead>Nombre</TableHead>
+                <TableHead className="w-28">Categoría</TableHead>
+                <TableHead className="w-24 text-center">Duración</TableHead>
+                <TableHead className="w-20 text-right">Precio</TableHead>
+                <TableHead className="w-20">Estado</TableHead>
                 <TableHead className="w-10" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {services.length === 0 && (
-                <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">No services yet</TableCell></TableRow>
+                <TableRow><TableCell colSpan={7} className="py-8 text-center text-muted-foreground">Aún no hay servicios</TableCell></TableRow>
               )}
               {services.map((svc) => (
                 <TableRow key={svc.id}>
@@ -61,7 +61,7 @@ export function ServiceList() {
                       className={`text-xs font-medium ${svc.active ? "text-emerald-600" : "text-muted-foreground"}`}
                       onClick={() => updateService(svc.id, { active: svc.active ? 0 : 1 })}
                     >
-                      {svc.active ? "Active" : "Inactive"}
+                      {svc.active ? "Activo" : "Inactivo"}
                     </button>
                   </TableCell>
                   <TableCell>

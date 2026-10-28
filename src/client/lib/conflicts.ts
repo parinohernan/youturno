@@ -19,12 +19,12 @@ export function conflictsFrom(err: unknown): Conflict[] | null {
   return (err.body as { conflicts?: Conflict[] }).conflicts ?? [];
 }
 
-/** `"10:00 - 11:00 booked for Jamie Rivera"`, or the reason for a blocked slot. */
+/** `"10:00 - 11:00 reservado para Jamie Rivera"`, or the reason for a blocked slot. */
 export function describeConflict(c: Conflict): string {
-  return `${c.start_time} - ${c.end_time} ${c.kind === "blocked" ? c.label : `booked for ${c.label}`}`;
+  return `${c.start_time} - ${c.end_time} ${c.kind === "blocked" ? c.label : `reservado para ${c.label}`}`;
 }
 
 /** One sentence, for the places with no room to list the clashes. */
 export function conflictSentence(who: string, conflicts: Conflict[]): string {
-  return `${who || "That staff member"} is not free then: ${conflicts.map(describeConflict).join(", ")}.`;
+  return `${who || "Este integrante del equipo"} no está disponible en ese horario: ${conflicts.map(describeConflict).join(", ")}.`;
 }

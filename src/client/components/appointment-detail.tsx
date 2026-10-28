@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { StatusBadge } from "./status-badge";
 import { RescheduleAppointment } from "./reschedule-appointment";
 import { conflictsFrom, conflictSentence } from "@/lib/conflicts";
+import { strings } from "@/lib/strings";
 
 export function AppointmentDetail() {
   const {
@@ -64,7 +65,7 @@ export function AppointmentDetail() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
                   <Label className="flex items-center gap-1.5 text-xs text-muted-foreground"><Clock className="h-3 w-3" /> Fecha y hora</Label>
-                  <p className="text-sm font-medium">{apt.scheduled_date} a las {apt.start_time} - {apt.end_time}</p>
+                  <p className="text-sm font-medium">{apt.scheduled_date} {strings.dateAtTime} {apt.start_time} - {apt.end_time}</p>
                   <Button variant="outline" size="sm" className="px-2" onClick={() => setRescheduling(true)}>Reprogramar</Button>
                 </div>
                 <div className="space-y-1">
@@ -80,7 +81,7 @@ export function AppointmentDetail() {
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">Equipo</Label>
                   <select className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={apt.staff_id || ""} onChange={(e) => handleStaffChange((e.target as HTMLSelectElement).value)}>
-                    <option value="">Sin asignar</option>
+                    <option value="">{strings.unassigned}</option>
                     {staffLookup.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>

@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { strings } from "@/lib/strings";
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#ef4444", "#14b8a6", "#6b7280"];
 
@@ -19,7 +20,7 @@ export function CreateService({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async () => {
-    if (!name.trim()) { setError("Name is required"); return; }
+    if (!name.trim()) { setError(strings.nameRequired); return; }
     setSaving(true);
     try {
       await addService({ name: name.trim(), description, duration: parseInt(duration) || 60, price: parseFloat(price) || 0, category, color });
@@ -35,28 +36,28 @@ export function CreateService({ onClose }: { onClose: () => void }) {
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Add Service</DialogTitle>
+          <DialogTitle>Agregar servicio</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label>Name *</Label>
-            <Input value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} placeholder="e.g. Haircut" />
+            <Label>Nombre *</Label>
+            <Input value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} placeholder="ej. Corte" />
           </div>
           <div className="space-y-1.5">
-            <Label>Description</Label>
-            <Textarea rows={2} value={description} onChange={(e) => setDescription((e.target as HTMLTextAreaElement).value)} placeholder="Brief description" />
+            <Label>Descripción</Label>
+            <Textarea rows={2} value={description} onChange={(e) => setDescription((e.target as HTMLTextAreaElement).value)} placeholder="Descripción breve" />
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div className="space-y-1.5">
-              <Label>Duration (min)</Label>
+              <Label>Duración (min)</Label>
               <Input type="number" value={duration} onChange={(e) => setDuration((e.target as HTMLInputElement).value)} />
             </div>
             <div className="space-y-1.5">
-              <Label>Price ($)</Label>
+              <Label>Precio ($)</Label>
               <Input type="number" step="0.01" value={price} onChange={(e) => setPrice((e.target as HTMLInputElement).value)} />
             </div>
             <div className="space-y-1.5">
-              <Label>Category</Label>
+              <Label>Categoría</Label>
               <Input value={category} onChange={(e) => setCategory((e.target as HTMLInputElement).value)} placeholder="General" />
             </div>
           </div>
@@ -75,8 +76,8 @@ export function CreateService({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={saving} onClick={handleSubmit}>{saving ? "Saving..." : "Add Service"}</Button>
+          <Button variant="outline" onClick={onClose}>Cancelar</Button>
+          <Button disabled={saving} onClick={handleSubmit}>{saving ? strings.saving : "Agregar servicio"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

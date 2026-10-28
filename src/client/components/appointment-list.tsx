@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { StatusBadge } from "./status-badge";
 import { Pagination } from "./pagination";
 import { CreateAppointment } from "./create-appointment";
+import { strings } from "@/lib/strings";
 
 export function AppointmentList() {
   const {
@@ -70,7 +71,7 @@ export function AppointmentList() {
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-xs text-muted-foreground">{apt.scheduled_date} a las {apt.start_time}</p>
+                      <p className="text-xs text-muted-foreground">{apt.scheduled_date} {strings.dateAtTime} {apt.start_time}</p>
                       <p className="break-words font-medium">{apt.client_name || "—"}</p>
                       <span className="mt-1 flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
                         {apt.staff_name && <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: apt.staff_color || "#7c3aed" }} />}

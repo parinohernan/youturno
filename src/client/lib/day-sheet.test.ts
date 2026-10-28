@@ -53,7 +53,7 @@ test("a day sheet includes blocked time and full appointment details in time ord
   const lines = csv.trimEnd().split("\r\n");
 
   assert.equal(lines.length, 3);
-  assert.match(lines[1], /"09:00","09:30","Blocked time"/);
+  assert.match(lines[1], /"09:00","09:30","Horario bloqueado"/);
   assert.match(lines[1], /"Team meeting"$/);
   assert.match(lines[2], /"APT-1","Maya Chen","Jamie Rivera","555-0100"/);
   assert.match(lines[2], /"Cut, style","confirmed","Prefers a quiet appointment"$/);
@@ -62,7 +62,7 @@ test("a day sheet includes blocked time and full appointment details in time ord
 test("an empty day still exports a useful header row", () => {
   const csv = buildDaySheetCsv("2026-09-26", [], []);
   assert.equal(csv.split("\r\n").filter(Boolean).length, 1);
-  assert.match(csv, /^"Date","Start","End","Type"/);
+  assert.match(csv, /^"Fecha","Inicio","Fin","Tipo"/);
 });
 
 test("spreadsheet formulas and CSV punctuation remain data", () => {

@@ -3,4 +3,9 @@
 export const strings = {
   saving: "Guardando...",
   nameRequired: "El nombre es obligatorio",
+  unassigned: "Sin asignar",
+  staffFallback: "Este integrante del equipo",
+  unavailableThen: "no está disponible en ese horario.",
+  saveChanges: "Guardar cambios",
+  dateAtTime: "a las", // connector between "{date}" and "{time}"
 } as const;
