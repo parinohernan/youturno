@@ -390,7 +390,7 @@ app.openapi(getAppointment, async (c) => {
      WHERE a.id = ?`,
     [id],
   );
-  if (!apt) return c.json({ error: "Not found" }, 404);
+  if (!apt) return c.json({ error: "No encontrado" }, 404);
 
   const svcs = await query<Record<string, unknown>>(
     `SELECT aps.*, sv.name as service_name FROM appointment_services aps
@@ -455,10 +455,10 @@ app.openapi(createAppointment, async (c) => {
   }
 
   const start = toMinutes(startTime);
-  if (start === null) return c.json({ error: "Times must be HH:MM" }, 400);
-  if (totalDuration <= 0) return c.json({ error: "The appointment must have a positive duration" }, 400);
+  if (start === null) return c.json({ error: "Los horarios deben tener formato HH:MM" }, 400);
+  if (totalDuration <= 0) return c.json({ error: "El turno debe tener una duración mayor a cero" }, 400);
   if (start + totalDuration >= 24 * 60) {
-    return c.json({ error: "Appointments must start and end on the same day" }, 400);
+    return c.json({ error: "El turno debe comenzar y terminar el mismo día" }, 400);
   }
   const endTime = addMinutes(startTime, totalDuration);
 
@@ -539,7 +539,7 @@ app.openapi(updateAppointment, async (c) => {
   const existing = await get<{
     staff_id: number | null; scheduled_date: string; start_time: string; end_time: string; status: string;
   }>("SELECT staff_id, scheduled_date, start_time, end_time, status FROM appointments WHERE id = ?", [id]);
-  if (!existing) return c.json({ error: "Not found" }, 404);
+  if (!existing) return c.json({ error: "No encontrado" }, 404);
 
   // Where the appointment lands once this patch is applied.
   const staffId = body.staff_id !== undefined ? body.staff_id : existing.staff_id;
@@ -567,8 +567,8 @@ app.openapi(updateAppointment, async (c) => {
   if (moved || restored) {
     const start = toMinutes(startTime);
     const end = toMinutes(endTime);
-    if (start === null || end === null) return c.json({ error: "Times must be HH:MM" }, 400);
-    if (end <= start) return c.json({ error: "The appointment must end after it starts on the same day" }, 400);
+    if (start === null || end === null) return c.json({ error: "Los horarios deben tener formato HH:MM" }, 400);
+    if (end <= start) return c.json({ error: "El turno debe terminar después de comenzar en el mismo día" }, 400);
 
     if (status !== "cancelled" && staffId && !allow_conflict) {
       const conflicts = findConflicts(startTime, endTime, await busyFor(staffId, date, Number(id)));
@@ -709,7 +709,7 @@ const getClient = createRoute({
 app.openapi(getClient, async (c) => {
   const { id } = c.req.valid("param");
   const client = await get<Record<string, unknown>>("SELECT * FROM clients WHERE id = ?", [id]);
-  if (!client) return c.json({ error: "Not found" }, 404);
+  if (!client) return c.json({ error: "No encontrado" }, 404);
   const appointments = await query<Record<string, unknown>>(
     `SELECT a.*, s.name as staff_name, s.color as staff_color,
             (SELECT GROUP_CONCAT(name, ', ')
@@ -1028,8 +1028,8 @@ app.openapi(createBlockedSlot, async (c) => {
   const { allow_conflict, ...body } = c.req.valid("json");
   const start = toMinutes(body.start_time);
   const end = toMinutes(body.end_time);
-  if (start === null || end === null) return c.json({ error: "Times must be HH:MM" }, 400);
-  if (end <= start) return c.json({ error: "Blocked time must end after it starts on the same day" }, 400);
+  if (start === null || end === null) return c.json({ error: "Los horarios deben tener formato HH:MM" }, 400);
+  if (end <= start) return c.json({ error: "El horario bloqueado debe terminar después de comenzar en el mismo día" }, 400);
 
   if (!allow_conflict) {
     const conflicts = findConflicts(

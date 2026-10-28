@@ -64,10 +64,13 @@ export function findConflicts(start_time: string, end_time: string, busy: Busy[]
  * another slot instead of failing the request back to a human.
  */
 export function describeConflicts(staffName: string, conflicts: Busy[], action: "book" | "block" = "book"): string {
-  const who = staffName || "That staff member";
+  const who = staffName || "Este integrante del equipo";
   const list = conflicts
     .map((c) => `${c.start_time}-${c.end_time} (${c.label})`)
     .join(", ");
-  const what = conflicts.every((c) => c.kind === "blocked") ? "unavailable" : "already booked";
-  return `${who} is ${what} at ${list}. Choose another time or staff member, or send allow_conflict: true to ${action} over it anyway.`;
+  // Mixed causes keep the stronger word: anything the caller can't override by
+  // blocking must read as "taken".
+  const what = conflicts.every((c) => c.kind === "blocked") ? "no está disponible" : "ya está ocupado";
+  const word = action === "block" ? "bloquearlo" : "agendarlo";
+  return `${who} ${what} en ${list}. Elige otro horario o integrante del equipo, o envía allow_conflict: true para ${word} de todas formas.`;
 }

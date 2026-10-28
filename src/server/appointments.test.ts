@@ -135,7 +135,7 @@ test("blocked time reports every clash and requires an explicit override", async
   const rejected = await block();
   assert.equal(rejected.status, 409);
   assert.deepEqual(rejected.body.conflicts.map((conflict: { kind: string }) => conflict.kind), ["appointment", "blocked"]);
-  assert.match(rejected.body.error, /allow_conflict: true to block over it anyway/);
+  assert.match(rejected.body.error, /allow_conflict: true para bloquearlo de todas formas/);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM blocked_slots").get()?.count, 1);
 
   assert.equal((await block({ allow_conflict: true })).status, 201);

@@ -72,21 +72,21 @@ test("a stored row that does not run forwards is skipped, not thrown on", () => 
 
 test("the message tells the caller what is in the way and how to proceed", () => {
   const msg = describeConflicts("Alex", [appt("10:00", "11:00", "Jamie Rivera")]);
-  assert.match(msg, /Alex is already booked at 10:00-11:00 \(Jamie Rivera\)/);
+  assert.match(msg, /Alex ya está ocupado en 10:00-11:00 \(Jamie Rivera\)/);
   assert.match(msg, /allow_conflict/);
 });
 
 test("the message names the explicit override action for blocked time", () => {
   const msg = describeConflicts("Alex", [appt("10:00", "11:00", "Jamie Rivera")], "block");
-  assert.match(msg, /allow_conflict: true to block over it anyway/);
+  assert.match(msg, /allow_conflict: true para bloquearlo de todas formas/);
 });
 
 test("time blocked off reads as unavailable rather than booked", () => {
-  assert.match(describeConflicts("Alex", [block("13:00", "14:00", "Lunch")]), /unavailable at 13:00-14:00 \(Lunch\)/);
+  assert.match(describeConflicts("Alex", [block("13:00", "14:00", "Lunch")]), /no está disponible en 13:00-14:00 \(Lunch\)/);
   // Mixed causes fall back to the stronger word.
-  assert.match(describeConflicts("Alex", [block("13:00", "14:00"), appt("14:00", "15:00")]), /already booked/);
+  assert.match(describeConflicts("Alex", [block("13:00", "14:00"), appt("14:00", "15:00")]), /ya está ocupado/);
 });
 
 test("the message survives a staff member with no name on file", () => {
-  assert.match(describeConflicts("", [appt("10:00", "11:00")]), /^That staff member is already booked/);
+  assert.match(describeConflicts("", [appt("10:00", "11:00")]), /^Este integrante del equipo ya está ocupado/);
 });
