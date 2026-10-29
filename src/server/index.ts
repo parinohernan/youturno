@@ -6,7 +6,7 @@ import { ensureSeeded } from "./seed.js";
 type Env = { Bindings: { DB: D1Database } };
 
 const app = createApp<Env>({
-  title: "OpenSalon",
+  title: "Youturno",
   version: "1.0.0",
   description: "Appointment scheduling and business management for salons, spas, and other appointment-based businesses.",
 });

@@ -72,7 +72,7 @@ export function downloadDaySheet(
   const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `opensalon-day-sheet-${date}.csv`;
+  link.download = `youturno-day-sheet-${date}.csv`;
   document.body.append(link);
   link.click();
   link.remove();
