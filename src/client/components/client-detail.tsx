@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { StatusBadge } from "./status-badge";
 import { CreateAppointment } from "./create-appointment";
 import { strings } from "@/lib/strings";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 
 export function ClientDetail() {
   const { selectedClient: client, selectedClientAppointments: appointments, navigate, updateClient, deleteClient } = useApp();
@@ -84,7 +85,7 @@ export function ClientDetail() {
                   </div>
                 )}
                 {client.notes && <p className="text-sm text-muted-foreground">{client.notes}</p>}
-                <p className="text-xs text-muted-foreground">Cliente desde {new Date(client.created_at).toLocaleDateString()}</p>
+                <p className="text-xs text-muted-foreground">Cliente desde {formatDate(client.created_at)}</p>
               </>
             )}
           </CardContent>
@@ -117,7 +118,7 @@ export function ClientDetail() {
                       {apt.staff_name && <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: apt.staff_color || "#7c3aed" }} />}
                       <span>{apt.staff_name || "—"}</span>
                     </span>
-                    <span className="font-medium">${apt.total_price.toFixed(2)}</span>
+                    <span className="font-medium">{formatMoney(apt.total_price)}</span>
                   </div>
                 </button>
               ))}
@@ -150,7 +151,7 @@ export function ClientDetail() {
                       </span>
                     </TableCell>
                     <TableCell><StatusBadge status={apt.status} /></TableCell>
-                    <TableCell className="text-right">${apt.total_price.toFixed(2)}</TableCell>
+                    <TableCell className="text-right">{formatMoney(apt.total_price)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

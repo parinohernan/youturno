@@ -25,5 +25,10 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    // Wrangler mutates the local D1 SQLite files on every API request; Vite
+    // would otherwise trigger a full page reload for each one.
+    watch: {
+      ignored: ["**/.wrangler/**", "**/data.db*"],
+    },
   },
 });

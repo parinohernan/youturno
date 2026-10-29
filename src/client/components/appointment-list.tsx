@@ -9,6 +9,7 @@ import { StatusBadge } from "./status-badge";
 import { Pagination } from "./pagination";
 import { CreateAppointment } from "./create-appointment";
 import { strings } from "@/lib/strings";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 
 export function AppointmentList() {
   const {
@@ -82,7 +83,7 @@ export function AppointmentList() {
                   </div>
                   <div className="mt-3 flex items-center justify-between gap-3 text-sm">
                     <span className="text-primary">{apt.identifier}</span>
-                    <span className="font-medium">${apt.total_price.toFixed(2)}</span>
+                    <span className="font-medium">{formatMoney(apt.total_price)}</span>
                   </div>
                 </button>
                 <button
@@ -129,7 +130,7 @@ export function AppointmentList() {
                     </span>
                   </TableCell>
                   <TableCell><StatusBadge status={apt.status} /></TableCell>
-                  <TableCell className="text-right">${apt.total_price.toFixed(2)}</TableCell>
+                  <TableCell className="text-right">{formatMoney(apt.total_price)}</TableCell>
                   <TableCell>
                     <Button aria-label={`Eliminar turno ${apt.identifier}`} variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={(e) => { e.stopPropagation(); deleteAppointment(apt.id); }}>
                       <Trash2 className="h-3.5 w-3.5" />

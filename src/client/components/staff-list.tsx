@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { CreateStaff } from "./create-staff";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 
 export function StaffList() {
   const { staffMembers, deleteStaff, updateStaff } = useApp();
@@ -50,7 +51,7 @@ export function StaffList() {
                 <dl className="mt-4 grid grid-cols-3 gap-4 border-t pt-4">
                   <div><dt className="text-sm text-muted-foreground">Turnos</dt><dd className="font-semibold tabular-nums">{s.appointment_count || 0}</dd></div>
                   <div><dt className="text-sm text-muted-foreground">Completados</dt><dd className="font-semibold tabular-nums">{s.completed_appointment_count || 0}</dd></div>
-                  <div><dt className="text-sm text-muted-foreground">Valor de servicios</dt><dd className="font-semibold tabular-nums">${(s.completed_service_value || 0).toFixed(2)}</dd></div>
+                  <div><dt className="text-sm text-muted-foreground">Valor de servicios</dt><dd className="font-semibold tabular-nums">{formatMoney(s.completed_service_value || 0)}</dd></div>
                 </dl>
                 <div className="mt-4 grid grid-cols-2 gap-2">
                   <Button variant="outline" className="min-h-11" onClick={() => updateStaff(s.id, { active: s.active ? 0 : 1 })}>
@@ -99,7 +100,7 @@ export function StaffList() {
                     <TableCell className="text-sm text-muted-foreground">{s.title || "—"}</TableCell>
                     <TableCell className="text-right tabular-nums">{s.appointment_count || 0}</TableCell>
                     <TableCell className="text-right tabular-nums">{s.completed_appointment_count || 0}</TableCell>
-                    <TableCell className="text-right font-medium tabular-nums">${(s.completed_service_value || 0).toFixed(2)}</TableCell>
+                    <TableCell className="text-right font-medium tabular-nums">{formatMoney(s.completed_service_value || 0)}</TableCell>
                     <TableCell>
                       <div className="flex justify-end gap-2">
                         <Button variant="outline" size="sm" onClick={() => updateStaff(s.id, { active: s.active ? 0 : 1 })}>

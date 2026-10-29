@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { StatusBadge } from "./status-badge";
 import { RescheduleAppointment } from "./reschedule-appointment";
 import { conflictsFrom, conflictSentence } from "@/lib/conflicts";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 import { strings } from "@/lib/strings";
 
 export function AppointmentDetail() {
@@ -99,7 +100,7 @@ export function AppointmentDetail() {
               </div>
               <div className="space-y-1">
                 <Label className="flex items-center gap-1.5 text-xs text-muted-foreground"><DollarSign className="h-3 w-3" /> Total</Label>
-                <p className="text-lg font-bold">${apt.total_price.toFixed(2)}</p>
+                <p className="text-lg font-bold">{formatMoney(apt.total_price)}</p>
               </div>
               {apt.notes && (
                 <div className="space-y-1">
@@ -126,7 +127,7 @@ export function AppointmentDetail() {
                       <span>{svc.service_name || `Servicio #${svc.service_id}`}</span>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">{svc.duration} min</span>
-                        <span className="font-medium">${svc.price.toFixed(2)}</span>
+                        <span className="font-medium">{formatMoney(svc.price)}</span>
                       </div>
                     </div>
                   ))}
@@ -159,7 +160,7 @@ export function AppointmentDetail() {
                     <div key={note.id} className="rounded-md border bg-muted/30 p-2.5">
                       <p className="text-sm">{note.content}</p>
                       <div className="mt-1 flex items-center justify-between">
-                        <span className="text-[10px] text-muted-foreground">{new Date(note.created_at).toLocaleString()}</span>
+                        <span className="text-[10px] text-muted-foreground">{formatDateTime(note.created_at)}</span>
                         <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-destructive" onClick={() => deleteAppointmentNote(note.id)}>
                           <Trash2 className="h-3 w-3" />
                         </Button>

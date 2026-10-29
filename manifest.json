@@ -1,6 +1,6 @@
 {
   "name": "OpenSalon",
-  "description": "Appointment scheduling and business management for salons, spas, barbershops, tattoo studios, nail salons, pet groomers, personal trainers, yoga studios, med spas, physiotherapy clinics, tutoring centers, and any appointment-based business. Like Salonist, Fresha, Square Appointments, or Vagaro. Features a day calendar with staff columns, service catalog, client management, product inventory, and blocked time slots.",
+  "description": "Agenda de turnos y gestión para salones, spas, barberías y cualquier negocio con turnos: calendario por equipo, catálogo de servicios, gestión de clientes, inventario de productos y horarios bloqueados.",
   "framework": "preact+hono",
   "files": [
     "agent.md",

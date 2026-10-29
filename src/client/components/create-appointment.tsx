@@ -2,6 +2,7 @@ import { useState } from "preact/hooks";
 import { useApp } from "../context";
 import { X, TriangleAlert } from "lucide-preact";
 import { conflictsFrom, describeConflict, type Conflict } from "@/lib/conflicts";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -127,7 +128,7 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
             </div>
             {selectedServices.length > 0 && (
               <p className="text-xs font-medium text-primary">
-                Total: {totalDuration} min &middot; ${totalPrice.toFixed(2)}
+                Total: {totalDuration} min &middot; {formatMoney(totalPrice)}
               </p>
             )}
           </div>

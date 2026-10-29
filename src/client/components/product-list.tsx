@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Pagination } from "./pagination";
 import { CreateProduct } from "./create-product";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 import type { Product } from "../types";
 
 export function ProductList() {
@@ -52,8 +53,8 @@ export function ProductList() {
                   )}
                 </div>
                 <div className="mt-3 grid grid-cols-3 gap-3 text-sm">
-                  <div><p className="text-xs text-muted-foreground">Precio</p><p className="font-medium tabular-nums">${p.price.toFixed(2)}</p></div>
-                  <div><p className="text-xs text-muted-foreground">Costo</p><p className="tabular-nums">${p.cost.toFixed(2)}</p></div>
+                  <div><p className="text-xs text-muted-foreground">Precio</p><p className="font-medium tabular-nums">{formatMoney(p.price)}</p></div>
+                  <div><p className="text-xs text-muted-foreground">Costo</p><p className="tabular-nums">{formatMoney(p.cost)}</p></div>
                   <div><p className="text-xs text-muted-foreground">Stock</p><p className="flex items-center gap-1 font-medium tabular-nums">{p.stock <= p.low_stock_alert && <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />}{p.stock}</p></div>
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-2">
@@ -94,8 +95,8 @@ export function ProductList() {
                   <TableCell>
                     {p.category && <Badge variant="outline" className="text-xs">{p.category}</Badge>}
                   </TableCell>
-                  <TableCell className="text-right font-medium">${p.price.toFixed(2)}</TableCell>
-                  <TableCell className="text-right text-sm text-muted-foreground">${p.cost.toFixed(2)}</TableCell>
+                  <TableCell className="text-right font-medium">{formatMoney(p.price)}</TableCell>
+                  <TableCell className="text-right text-sm text-muted-foreground">{formatMoney(p.cost)}</TableCell>
                   <TableCell className="text-center">
                     <span className="flex items-center justify-center gap-1">
                       {p.stock <= p.low_stock_alert && (

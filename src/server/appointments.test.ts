@@ -191,7 +191,7 @@ test("client history summarizes services and the latest service note", async (t)
   const history = await call("GET", "/api/clients/1");
   assert.equal(history.status, 200);
   const visit = history.body.appointments.find((appointment: { id: number }) => appointment.id === id);
-  assert.equal(visit.service_names, "Standard Session, Quick Service");
+  assert.equal(visit.service_names, "Corte de pelo, Corte + barba");
   assert.equal(visit.latest_note, "Latest formula");
   const blankVisit = history.body.appointments.find((appointment: { id: number }) => appointment.id === blank.body.appointment.id);
   assert.equal(blankVisit.service_names, null);

@@ -63,6 +63,10 @@ pnpm run dev
 
 Open `http://localhost:5174` in your browser. Data persists in `data.db`.
 
+### Existing databases / localization note
+
+Spanish sample data ships in `src/server/seed.ts`. It only seeds tables that are empty, so existing dev databases keep their English rows; mixed-language demo data is expected and supported — no migration ships. To reset local data: stop the dev server, delete `.wrangler/state` (local D1), and run `pnpm dev` for a fresh Spanish seed. For booking integrators: the 409 conflict message is now Spanish; the machine token `allow_conflict: true` is preserved verbatim inside the sentence — prose-matching agents must update their matchers.
+
 ### Agent Mode (for OpenClaw / Claude Code)
 
 Append `?agent` to the URL:

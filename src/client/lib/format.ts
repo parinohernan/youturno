@@ -21,6 +21,7 @@ const fmtMonthShort = new Intl.DateTimeFormat(LOCALE, { month: "short" });
 const fmtYear = new Intl.DateTimeFormat(LOCALE, { year: "numeric" });
 const fmtWeekdayLong = new Intl.DateTimeFormat(LOCALE, { weekday: "long" });
 const fmtTime = new Intl.DateTimeFormat(LOCALE, { hour: "2-digit", minute: "2-digit", hour12: false });
+const fmtMoney = new Intl.NumberFormat(LOCALE, { style: "currency", currency: "USD", currencyDisplay: "narrowSymbol" });
 
 const EM_DASH = "—";
 
@@ -62,4 +63,10 @@ export function formatTime(value: string | Date): string {
 export function formatHour(hour: number): string {
   if (!Number.isFinite(hour) || hour < 0 || hour >= 24) return EM_DASH;
   return `${String(Math.floor(hour)).padStart(2, "0")}:00`;
+}
+
+/** USD rendered with es-419's own dot-decimal convention, e.g. "$1,234.56". */
+export function formatMoney(amount: number): string {
+  if (!Number.isFinite(amount)) return EM_DASH;
+  return fmtMoney.format(amount);
 }

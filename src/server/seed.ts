@@ -14,20 +14,20 @@ type ClientSeed = [id: number, name: string, email: string, phone: string];
 type ProductSeed = [id: number, name: string, brand: string, category: string, price: number, cost: number, stock: number];
 
 const STAFF: StaffSeed[] = [
-  [1, "Alex", "alex@example.com", "Senior Stylist", "#3b82f6"],
-  [2, "Jordan", "jordan@example.com", "Therapist", "#10b981"],
-  [3, "Sam", "sam@example.com", "Specialist", "#f59e0b"],
-  [4, "Taylor", "taylor@example.com", "Junior Stylist", "#8b5cf6"],
+  [1, "Alex", "alex@example.com", "Estilista senior", "#3b82f6"],
+  [2, "Jordan", "jordan@example.com", "Terapeuta", "#10b981"],
+  [3, "Sam", "sam@example.com", "Especialista", "#f59e0b"],
+  [4, "Taylor", "taylor@example.com", "Estilista junior", "#8b5cf6"],
 ];
 
 // Generic so they work across verticals.
 const SERVICES: ServiceSeed[] = [
-  [1, "Standard Session", "Standard appointment", 60, 50, "#3b82f6", "General"],
-  [2, "Quick Service", "Short appointment", 30, 30, "#10b981", "General"],
-  [3, "Premium Session", "Extended premium service", 90, 85, "#8b5cf6", "Premium"],
-  [4, "Express Touch-up", "Quick 15-minute service", 15, 20, "#f59e0b", "Express"],
-  [5, "Consultation", "Initial consultation", 30, 0, "#6b7280", "General"],
-  [6, "Package Deal", "Multiple services bundled", 120, 120, "#ec4899", "Premium"],
+  [1, "Corte de pelo", "Corte clásico", 60, 50, "#3b82f6", "General"],
+  [2, "Corte + barba", "Turno corto", 30, 30, "#10b981", "General"],
+  [3, "Tratamiento premium", "Servicio premium extendido", 90, 85, "#8b5cf6", "Premium"],
+  [4, "Arreglo express", "Servicio rápido de 15 minutos", 15, 20, "#f59e0b", "Express"],
+  [5, "Consulta", "Consulta inicial", 30, 0, "#6b7280", "General"],
+  [6, "Paquete", "Varios servicios combinados", 120, 120, "#ec4899", "Premium"],
 ];
 
 const CLIENTS: ClientSeed[] = [
@@ -38,10 +38,10 @@ const CLIENTS: ClientSeed[] = [
 ];
 
 const PRODUCTS: ProductSeed[] = [
-  [1, "Professional Shampoo", "ProCare", "Hair Care", 24.99, 12.0, 25],
-  [2, "Styling Gel", "ProCare", "Styling", 15.99, 7.5, 40],
-  [3, "Moisturizing Cream", "SkinLux", "Skin Care", 32.99, 16.0, 18],
-  [4, "Essential Oil Set", "AromaPlus", "Wellness", 45.99, 22.0, 12],
+  [1, "Shampoo profesional", "ProCare", "Cuidado del cabello", 24.99, 12.0, 25],
+  [2, "Gel de peinado", "ProCare", "Estilizado", 15.99, 7.5, 40],
+  [3, "Crema hidratante", "SkinLux", "Cuidado de la piel", 32.99, 16.0, 18],
+  [4, "Set de aceites esenciales", "AromaPlus", "Bienestar", 45.99, 22.0, 12],
 ];
 
 let seeded = false;

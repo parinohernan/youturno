@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatDate, formatDateTime, formatHour, formatTime } from "./format.ts";
+import { formatDate, formatDateTime, formatHour, formatMoney, formatTime } from "./format.ts";
 
 test("formatDate formats a Date", () => {
   assert.equal(formatDate(new Date(2026, 0, 5, 12)), "5 de ene de 2026");
@@ -36,4 +36,10 @@ test("formatTime renders clean 24-hour HH:MM", () => {
 test("formatHour renders the 24-hour gutter label", () => {
   assert.equal(formatHour(7), "07:00");
   assert.equal(formatHour(14), "14:00");
+});
+
+test("formatMoney renders USD with CLDR es-419 decimals", () => {
+  assert.equal(formatMoney(1234.56), "$1,234.56");
+  assert.equal(formatMoney(0.5), "$0.50");
+  assert.equal(formatMoney(Number.NaN), "—");
 });

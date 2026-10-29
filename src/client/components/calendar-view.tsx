@@ -10,7 +10,7 @@ import { CreateAppointment } from "./create-appointment";
 import { cn } from "@/lib/utils";
 import { packLanes } from "@/lib/overlap";
 import { parseDate, shiftDate, today } from "@/lib/dates";
-import { formatDate, formatHour } from "@/lib/format";
+import { formatDate, formatHour, formatMoney } from "@/lib/format";
 import { calendarSlotMinutes, formatCalendarTime } from "@/lib/calendar-slot";
 import { conflictsFrom, describeConflict, type Conflict } from "@/lib/conflicts";
 import { strings } from "@/lib/strings";
@@ -290,7 +290,7 @@ export function CalendarView() {
                         <div className="text-[10px] font-medium text-muted-foreground">{apt.start_time} - {apt.end_time}</div>
                         <div className="truncate text-xs font-semibold">{apt.client_name}</div>
                         {services && height > 50 && <div className="truncate text-[10px] text-muted-foreground">{services}</div>}
-                        {height > 40 && <div className="text-[10px] font-medium">${apt.total_price.toFixed(2)}</div>}
+                        {height > 40 && <div className="text-[10px] font-medium">{formatMoney(apt.total_price)}</div>}
                       </button>
                     );
                   })}
@@ -335,7 +335,7 @@ export function CalendarView() {
                       >
                         <div className="text-[10px] font-medium text-muted-foreground">{apt.start_time} - {apt.end_time}</div>
                         <div className="truncate text-xs font-semibold">{apt.client_name}</div>
-                        <div className="text-[10px] font-medium">${apt.total_price.toFixed(2)}</div>
+                        <div className="text-[10px] font-medium">{formatMoney(apt.total_price)}</div>
                       </button>
                     );
                   })}

@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { today } from "@/lib/dates";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 
 export function Dashboard() {
   const { stats, navigate, calendarAppointments } = useApp();
@@ -17,7 +18,7 @@ export function Dashboard() {
     { label: "Turnos de hoy", value: stats.today_appointments, icon: CalendarDays, color: "text-violet-600 bg-violet-50", onClick: () => navigate("/calendar") },
     { label: "Próximos", value: stats.upcoming_appointments, icon: Clock, color: "text-blue-600 bg-blue-50", onClick: () => navigate("/appointments") },
     { label: "Clientes", value: stats.clients, icon: Users, color: "text-emerald-600 bg-emerald-50", onClick: () => navigate("/clients") },
-    { label: "Valor de servicios completados", value: `$${stats.revenue.toFixed(0)}`, icon: DollarSign, color: "text-amber-600 bg-amber-50" },
+    { label: "Valor de servicios completados", value: formatMoney(stats.revenue), icon: DollarSign, color: "text-amber-600 bg-amber-50" },
     { label: "Productos", value: stats.products, icon: Package, color: "text-rose-600 bg-rose-50", onClick: () => navigate("/products") },
   ];
 
@@ -89,7 +90,7 @@ export function Dashboard() {
                         {apt.staff_name || "—"}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right">${apt.total_price.toFixed(2)}</TableCell>
+                    <TableCell className="text-right">{formatMoney(apt.total_price)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

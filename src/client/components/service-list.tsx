@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { CreateService } from "./create-service";
+import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 
 export function ServiceList() {
   const { services, deleteService, updateService } = useApp();
@@ -55,7 +56,7 @@ export function ServiceList() {
                     {svc.category && <Badge variant="outline" className="text-xs">{svc.category}</Badge>}
                   </TableCell>
                   <TableCell className="text-center">{svc.duration} min</TableCell>
-                  <TableCell className="text-right font-medium">${svc.price.toFixed(2)}</TableCell>
+                  <TableCell className="text-right font-medium">{formatMoney(svc.price)}</TableCell>
                   <TableCell>
                     <button
                       className={`text-xs font-medium ${svc.active ? "text-emerald-600" : "text-muted-foreground"}`}
