@@ -1,8 +1,8 @@
-<img src="readme-banner.png" alt="OpenSalon preview" width="100%" />
+<img src="readme-banner.png" alt="Youturno preview" width="100%" />
 
-# OpenSalon: The Open-Source Salonist & Fresha Alternative
+# Youturno: The Open-Source Salonist & Fresha Alternative
 
-[![Deploy with Clawnify](https://app.clawnify.com/deploy-button.svg)](https://app.clawnify.com/deploy?repo=clawnify/OpenSalon)
+[![Deploy with Clawnify](https://app.clawnify.com/deploy-button.svg)](https://app.clawnify.com/deploy?repo=clawnify/youturno)
 
 An appointment booking and business management app for salons, spas, barbershops, tattoo studios, and any appointment-based business. Part of the [OpenClaw](https://github.com/openclaw/openclaw) ecosystem. Zero cloud dependencies — runs locally with SQLite.
 
@@ -10,13 +10,13 @@ Built with **Preact + Tailwind CSS v4 + shadcn/ui + Hono + SQLite**. Ships with 
 
 ## What Is It?
 
-OpenSalon is a production-ready appointment scheduling platform designed for the OpenClaw community. Think of it as an open-source alternative to **Salonist**, **Fresha**, **Square Appointments**, **Vagaro**, or **Booksy** — a complete booking and staff management system you can self-host, customize, and embed in any SaaS product.
+Youturno is a production-ready appointment scheduling platform designed for the OpenClaw community. Think of it as an open-source alternative to **Salonist**, **Fresha**, **Square Appointments**, **Vagaro**, or **Booksy** — a complete booking and staff management system you can self-host, customize, and embed in any SaaS product.
 
 Unlike Salonist or Fresha, this runs entirely on your own infrastructure. No per-user fees, no booking commissions, no vendor lock-in. Manage your entire appointment-based operation from scheduling to inventory.
 
 ## Built for Every Appointment-Based Business
 
-OpenSalon is **vertical-agnostic** — configure services, pricing, and staff for any industry:
+Youturno is **vertical-agnostic** — configure services, pricing, and staff for any industry:
 
 | Industry | Example Services |
 |----------|-----------------|
@@ -55,11 +55,13 @@ OpenSalon is **vertical-agnostic** — configure services, pricing, and staff fo
 ## Quickstart
 
 ```bash
-git clone https://github.com/clawnify/OpenSalon.git
-cd OpenSalon
+git clone https://github.com/clawnify/youturno.git
+cd youturno
 pnpm install
 pnpm run dev
 ```
+
+> **Note:** The GitHub repo rename to `clawnify/youturno` is a pending owner follow-up; the clone and deploy URLs above point to the target repository.
 
 Open `http://localhost:5174` in your browser. Data persists in `data.db`.
 

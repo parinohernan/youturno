@@ -1,8 +1,8 @@
-# OpenSalon operating guide
+# Youturno operating guide
 
 ## Division of labour
 
-Translate the user's request into salon operations, but let OpenSalon own IDs, prices, durations, availability, and history. Never invent a client, service, staff ID, or booking total. Never bypass a scheduling conflict unless the user explicitly accepts that overlap. Prefer cancellation over deletion so the salon keeps its history; hard-delete only when the user clearly asks for permanent removal.
+Translate the user's request into salon operations, but let Youturno own IDs, prices, durations, availability, and history. Never invent a client, service, staff ID, or booking total. Never bypass a scheduling conflict unless the user explicitly accepts that overlap. Prefer cancellation over deletion so the salon keeps its history; hard-delete only when the user clearly asks for permanent removal.
 
 ## Booking and managing an appointment
 
