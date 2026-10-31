@@ -58,16 +58,27 @@ Youturno is **vertical-agnostic** — configure services, pricing, and staff for
 git clone https://github.com/clawnify/youturno.git
 cd youturno
 pnpm install
+# Back up local D1, configure .dev.vars and bootstrap the superadmin below.
 pnpm run dev
 ```
 
 > **Note:** The GitHub repo rename to `clawnify/youturno` is a pending owner follow-up; the clone and deploy URLs above point to the target repository.
 
-Open `http://localhost:5174` in your browser. Data persists in `data.db`.
+Follow [local authentication setup](#local-authentication-setup) before opening the app. Open the Vite URL printed by `pnpm dev` (usually `http://localhost:5173`). Local D1 state persists in `.wrangler/`.
 
-### Existing databases / localization note
+### Existing databases and tenant isolation
 
-Spanish sample data ships in `src/server/seed.ts`. It only seeds tables that are empty, so existing dev databases keep their English rows; mixed-language demo data is expected and supported — no migration ships. To reset local data: stop the dev server, delete `.wrangler/state` (local D1), and run `pnpm dev` for a fresh Spanish seed. For booking integrators: the 409 conflict message is now Spanish; the machine token `allow_conflict: true` is preserved verbatim inside the sentence — prose-matching agents must update their matchers.
+Business API routes require a logged-in user of an active company. Every list, statistic, detail, calendar, conflict check, update, delete, and referenced ID is restricted by the server-resolved company. Other-company resource IDs return 404 for detail/update/delete; invalid referenced IDs return 400. The superadmin cannot access business routes. Appointment identifiers use one **global atomic counter**, so `APT-123` is unique across all companies; identifiers can have gaps and must not be treated as company-specific information.
+
+Before applying the additive migration, back up your database. For local D1, stop the dev server and export with `pnpm exec wrangler d1 export youturno-db --local --output=backup.sql` (store the export outside the repository). Run `pnpm migrate:local`; `pnpm dev` also runs it on startup. This adds `companies` and `tenant_ownership`, associates existing rows in all eight business tables with one legacy company, and preserves all original tables, IDs, foreign keys and existing counter values. It is repeatable: the legacy backfill runs only while there is one company and never reassigns existing ownership. Fresh business rows and their ownership records are inserted atomically via D1 batches; database triggers reject cross-company appointment links and clean up ownership on cascades. Empty databases remain empty; sample rows are no longer inserted on requests. Keep `.wrangler/` intact; never reset local D1 to perform this migration. For an existing deployment, back up first, then apply `src/server/schema.sql` followed by `src/server/migrate-legacy.sql` using that deployment's own D1 migration procedure; no production command runs automatically.
+
+### Local authentication setup
+
+1. Create `.dev.vars` with `AUTH_SECRET=<random secret of at least 32 characters>`; keep it private. Production must configure the Worker secret separately. Set `APP_ORIGIN=https://your-domain` in production if a proxy changes the incoming request origin. For local Vite, localhost ports are accepted without this variable.
+2. Run `pnpm migrate:local` after backing up D1. Provision the single superadmin explicitly with `password-manager-command | pnpm bootstrap:local admin@example.com`. The password is read from stdin (12–1024 characters), never from command arguments or a default. This command operates only on local D1 and records a bootstrap audit event; a second invocation cannot add another superadmin.
+3. Sign in from the UI. The superadmin can provision accounts for an existing company or an unattached first user. That first user names their own company, which remains pending until superadmin activation. If legacy business rows exist but the legacy migration has not run, onboarding returns 503 instead of letting the first new account claim them. Additional accounts require the superadmin to confirm an existing agreement. For a migrated legacy database, provision its initial operator as a user attached to the existing legacy company; future first users configure new companies themselves.
+
+Sessions use short-lived signed HttpOnly Secure SameSite cookies, a server-side session version for logout revocation and a CSRF header supplied by the same-origin UI. On localhost, browsers treat Secure cookies as a localhost exception; use HTTPS on non-local hosts. No public signup or invitation endpoint exists.
 
 ### Agent Mode (for OpenClaw / Claude Code)
 

@@ -1,9 +1,13 @@
 import { createApp, createRoute, z } from "@clawnify/app";
 import { query, get, run } from "./db.js";
 import { findConflicts, describeConflicts, toMinutes, type Busy } from "./scheduling.js";
-import { ensureSeeded } from "./seed.js";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
+import { COOKIE, hashPassword, verifyPassword, signToken, verifyToken, safeEqual, type Token } from "./auth.js";
 
-type Env = { Bindings: { DB: D1Database } };
+type Actor = { id: number; email: string; role: "superadmin" | "tenant"; company_id: number | null; session_version: number; company_name: string | null; company_status: string | null };
+type D1Statement = { bind(...values: (number | string | null)[]): D1Statement };
+type D1Database = { prepare(sql: string): D1Statement; batch(statements: D1Statement[]): Promise<{ meta: { changes: number } }[]> };
+type Env = { Bindings: { DB: D1Database; AUTH_SECRET: string; APP_ORIGIN?: string }; Variables: { actor: Actor; claims: Token } };
 
 const app = createApp<Env>({
   title: "Youturno",
@@ -11,18 +15,169 @@ const app = createApp<Env>({
   description: "Appointment scheduling and business management for salons, spas, and other appointment-based businesses.",
 });
 
-// Seed sample data + the appointment counter rows on the first request an
-// isolate serves. Registered after createApp's `initDB` middleware and before
-// every route, so handlers always see the _meta rows.
-app.use("*", async (_c, next) => {
-  await ensureSeeded();
+// A configured secret and a freshly loaded DB actor are required even on the
+// old single-company routes. Admin never receives implicit business access.
+function originAllowed(c: { req: { header: (name: string) => string | undefined; url: string }; env: Env["Bindings"] }): boolean {
+  const origin = c.req.header("origin");
+  if (!origin) return false;
+  const url = new URL(c.req.url);
+  if (c.env.APP_ORIGIN) return origin === c.env.APP_ORIGIN;
+  if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") return origin === url.origin && url.protocol === "https:";
+  // Vite proxies /api to Wrangler on a different localhost port in development.
+  try { const source = new URL(origin); return source.protocol === "http:" && source.hostname === url.hostname &&
+    (source.port === url.port || /^517\d$/.test(source.port)); } catch { return false; }
+}
+
+app.use("/api/*", async (c, next) => {
+  if (!c.env.AUTH_SECRET || c.env.AUTH_SECRET.length < 32) return c.json({ error: "Servicio no configurado" }, 503);
+  const path = new URL(c.req.url).pathname;
+  const mutation = !["GET", "HEAD", "OPTIONS"].includes(c.req.method);
+  if (mutation && (!originAllowed(c) || !c.req.header("content-type")?.toLowerCase().startsWith("application/json"))) {
+    return c.json({ error: "Origen o formato no permitido" }, 403);
+  }
+  if (path === "/api/auth/login") return next();
+
+  const jwt = getCookie(c, COOKIE);
+  const claims = jwt ? await verifyToken(c.env.AUTH_SECRET, jwt) : null;
+  if (!claims) return c.json({ error: "Iniciá sesión" }, 401);
+  const actor = await get<Actor>(`SELECT u.id, u.email, u.role, u.company_id, u.session_version,
+    co.name AS company_name, co.status AS company_status FROM users u
+    LEFT JOIN companies co ON co.id = u.company_id WHERE u.id = ?`, [claims.sub]);
+  if (!actor || actor.session_version !== claims.sv ||
+    (actor.role === "tenant" && actor.company_id !== null && !actor.company_status)) return c.json({ error: "Sesión no válida" }, 401);
+  c.set("actor", actor);
+  c.set("claims", claims);
+  if (mutation && !safeEqual(c.req.header("x-csrf-token") || "", claims.csrf)) return c.json({ error: "Token de seguridad inválido" }, 403);
+  if (path.startsWith("/api/auth/")) return next();
+  if (path.startsWith("/api/admin/")) {
+    if (actor.role !== "superadmin") return c.json({ error: "Acceso denegado" }, 403);
+    return next();
+  }
+  if (path === "/api/onboarding/company") {
+    if (actor.role !== "tenant" || actor.company_id !== null) return c.json({ error: "La cuenta ya tiene empresa" }, 403);
+    return next();
+  }
+  if (actor.role !== "tenant" || actor.company_status !== "active") return c.json({ error: "Empresa pendiente o inactiva" }, 403);
   await next();
+});
+
+const credentials = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(1024) });
+const userInput = z.object({ email: z.string().email().max(254), password: z.string().min(12).max(1024) });
+
+app.post("/api/auth/login", async (c) => {
+  const parsed = credentials.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Credenciales inválidas" }, 400);
+  const email = parsed.data.email.trim().toLowerCase();
+  const now = Math.floor(Date.now() / 1000);
+  const attempts = await get<{ failures: number; locked_until: number }>("SELECT failures, locked_until FROM login_attempts WHERE email = ?", [email]);
+  if (attempts && attempts.locked_until > now) return c.json({ error: "Intentá nuevamente más tarde" }, 429);
+  const user = await get<Actor & { password_hash: string }>("SELECT id, email, role, company_id, session_version, password_hash FROM users WHERE email = ?", [email]);
+  const valid = user && await verifyPassword(parsed.data.password, user.password_hash);
+  if (!valid) {
+    const failures = attempts?.locked_until && attempts.locked_until <= now ? 1 : (attempts?.failures ?? 0) + 1;
+    await run(`INSERT INTO login_attempts (email, failures, locked_until) VALUES (?, ?, ?)
+      ON CONFLICT(email) DO UPDATE SET failures = excluded.failures, locked_until = excluded.locked_until`,
+      [email, failures, failures >= 5 ? now + 900 : 0]);
+    return c.json({ error: "Credenciales inválidas" }, 401);
+  }
+  await run("DELETE FROM login_attempts WHERE email = ?", [email]);
+  const { jwt, csrf } = await signToken(c.env.AUTH_SECRET, user.id, user.session_version);
+  setCookie(c, COOKIE, jwt, { httpOnly: true, secure: true, sameSite: "Strict", path: "/", maxAge: 8 * 60 * 60 });
+  return c.json({ ok: true, csrf });
+});
+
+app.get("/api/auth/session", (c) => {
+  const actor = c.get("actor");
+  return c.json({ email: actor.email, role: actor.role, company_id: actor.company_id,
+    company_name: actor.company_name, company_status: actor.company_status, csrf: c.get("claims").csrf });
+});
+
+app.post("/api/auth/logout", async (c) => {
+  await run("UPDATE users SET session_version = session_version + 1 WHERE id = ?", [c.get("actor").id]);
+  deleteCookie(c, COOKIE, { secure: true, path: "/" });
+  return c.json({ ok: true });
+});
+
+app.get("/api/admin/companies", async (c) => {
+  const companies = await query<{ id: number; name: string; status: string; created_at: string; users: number }>(
+    `SELECT co.id, co.name, co.status, co.created_at, COUNT(u.id) AS users
+     FROM companies co LEFT JOIN users u ON u.company_id = co.id GROUP BY co.id ORDER BY co.id`);
+  return c.json({ companies });
+});
+
+app.post("/api/admin/users", async (c) => {
+  const parsed = userInput.extend({ company_id: z.number().int().positive().nullable().optional(), agreement_confirmed: z.boolean().optional() }).safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Datos inválidos" }, 400);
+  const companyId = parsed.data.company_id ?? null;
+  if (companyId && !(await get("SELECT id FROM companies WHERE id = ?", [companyId]))) return c.json({ error: "Empresa inexistente" }, 404);
+  if (companyId) {
+    const existing = await get<{ count: number }>("SELECT COUNT(*) AS count FROM users WHERE company_id = ?", [companyId]);
+    if ((existing?.count ?? 0) > 0 && parsed.data.agreement_confirmed !== true) {
+      return c.json({ error: "Confirmá el acuerdo antes de crear cuentas adicionales" }, 403);
+    }
+  }
+  const passwordHash = await hashPassword(parsed.data.password);
+  try {
+    const result = await run("INSERT INTO users (email, password_hash, role, company_id) VALUES (?, ?, 'tenant', ?)",
+      [parsed.data.email.trim().toLowerCase(), passwordHash, companyId]);
+    return c.json({ id: result.lastInsertRowid }, 201);
+  } catch { return c.json({ error: "La cuenta ya existe" }, 409); }
+});
+
+app.put("/api/admin/companies/:id/status", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = z.object({ status: z.enum(["active", "disabled"]) }).safeParse(await c.req.json().catch(() => null));
+  if (!Number.isSafeInteger(id) || id < 1 || !body.success) return c.json({ error: "Datos inválidos" }, 400);
+  const result = await run("UPDATE companies SET status = ? WHERE id = ?", [body.data.status, id]);
+  return result.changes ? c.json({ ok: true }) : c.json({ error: "Empresa inexistente" }, 404);
+});
+
+app.post("/api/onboarding/company", async (c) => {
+  const body = z.object({ name: z.string().trim().min(2).max(120) }).safeParse(await c.req.json().catch(() => null));
+  if (!body.success) return c.json({ error: "Nombre inválido" }, 400);
+  // Schema DDL alone does not backfill the legacy company. Never let a first
+  // user claim unmigrated business rows by creating the first company as id 1.
+  const unmigrated = await get<{ present: number }>(`SELECT CASE WHEN
+    EXISTS (SELECT 1 FROM clients) OR EXISTS (SELECT 1 FROM staff) OR
+    EXISTS (SELECT 1 FROM services) OR EXISTS (SELECT 1 FROM appointments) OR
+    EXISTS (SELECT 1 FROM appointment_services) OR EXISTS (SELECT 1 FROM appointment_notes) OR
+    EXISTS (SELECT 1 FROM blocked_slots) OR EXISTS (SELECT 1 FROM products)
+    THEN 1 ELSE 0 END AS present`);
+  const companies = await get<{ count: number }>("SELECT COUNT(*) AS count FROM companies");
+  if ((companies?.count ?? 0) === 0 && unmigrated?.present) {
+    return c.json({ error: "Migrá los datos existentes antes de crear una empresa" }, 503);
+  }
+  const db = c.env.DB;
+  if (!db?.batch) return c.json({ error: "Onboarding requiere transacciones D1" }, 503);
+  const id = c.get("actor").id;
+  const reservation = `__onboarding:${crypto.randomUUID()}`;
+  try {
+    // A random reservation identifies ONLY this transaction's insert. Never
+    // reuse last_insert_rowid(): concurrent batches could attach another user
+    // to the first company's ID when their conditional insert did nothing.
+    const results = await db.batch([
+      db.prepare(`INSERT INTO companies (name, status) SELECT ?, 'pending'
+        WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'tenant' AND company_id IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM company_onboarding WHERE user_id = ?)`).bind(reservation, id, id),
+      db.prepare(`INSERT INTO company_onboarding (user_id, company_id)
+        SELECT ?, id FROM companies WHERE name = ?
+        AND EXISTS (SELECT 1 FROM users WHERE id = ? AND company_id IS NULL)`).bind(id, reservation, id),
+      db.prepare("UPDATE companies SET name = ? WHERE name = ?").bind(body.data.name, reservation),
+      db.prepare(`UPDATE users SET company_id = (SELECT company_id FROM company_onboarding WHERE user_id = ?)
+        WHERE id = ? AND company_id IS NULL`).bind(id, id),
+    ]);
+    if (results[0].meta.changes !== 1 || results[1].meta.changes !== 1 || results[3].meta.changes !== 1) {
+      return c.json({ error: "El alta de nuevas empresas todavía no está disponible" }, 503);
+    }
+    return c.json({ ok: true, status: "pending" }, 201);
+  } catch { return c.json({ error: "No se pudo crear la empresa" }, 409); }
 });
 
 // ── Shared Schemas ─────────────────────────────────────────────────
 
 const ErrorSchema = z.object({ error: z.string() }).openapi("Error");
 const OkSchema = z.object({ ok: z.boolean() }).openapi("Ok");
+const NotFoundResponse = { description: "Not found", content: { "application/json": { schema: ErrorSchema } } };
 
 const ConflictSchema = z.object({
   error: z.string(),
@@ -141,17 +296,33 @@ const IdParam = z.object({ id: z.string().openapi({ description: "Resource ID" }
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-async function nextIdentifier(): Promise<string> {
-  const prefix = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'appointment_prefix'");
-  const counter = await get<{ value: string }>("SELECT value FROM _meta WHERE key = 'appointment_counter'");
-  const next = parseInt(counter?.value || "0", 10) + 1;
-  // Upsert, not UPDATE: a plain UPDATE matches zero rows if the counter row is
-  // missing, which would hand out the same identifier forever.
-  await run(
-    "INSERT INTO _meta (key, value) VALUES ('appointment_counter', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    [String(next)],
-  );
-  return `${prefix?.value || "APT"}-${next}`;
+type TenantContext = { env: Env["Bindings"]; get(key: "actor"): Actor };
+type OwnedTable = "clients" | "staff" | "services" | "appointments" | "appointment_services" | "appointment_notes" | "blocked_slots" | "products";
+
+function tenant(c: TenantContext): number {
+  const id = c.get("actor").company_id;
+  if (id === null) throw new Error("Tenant context required");
+  return id;
+}
+
+async function owns(c: TenantContext, table: OwnedTable, id: number | string): Promise<boolean> {
+  if (!Number.isSafeInteger(Number(id)) || Number(id) < 1) return false;
+  return !!(await get(`SELECT 1 FROM tenant_ownership WHERE resource_type = ? AND resource_id = ? AND company_id = ?`,
+    [table, id, tenant(c)]));
+}
+
+/** An unconditional insert and its ownership record commit together or not at all. */
+async function insertOwned(c: TenantContext, table: OwnedTable, sql: string, values: (string | number | null)[]): Promise<number> {
+  if (!c.env.DB?.batch) throw new Error("D1 transactions required for tenant writes");
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(sql).bind(...values),
+    c.env.DB.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES (?, last_insert_rowid(), ?)")
+      .bind(table, tenant(c)),
+  ]);
+  if (results[0].meta.changes !== 1 || results[1].meta.changes !== 1) throw new Error("Tenant insert failed");
+  // The second INSERT sets last_insert_rowid to the ownership table rowid;
+  // the first result retains the business ID from its own statement.
+  return Number((results[0].meta as { last_row_id?: number }).last_row_id);
 }
 
 function addMinutes(time: string, minutes: number): string {
@@ -170,18 +341,22 @@ function addMinutes(time: string, minutes: number): string {
  * matches what `/api/calendar` draws, so the rule an owner sees is simply
  * "if it is on the calendar, it is taken".
  */
-async function busyFor(staffId: number, date: string, excludeAppointmentId?: number): Promise<Busy[]> {
+async function busyFor(c: TenantContext, staffId: number, date: string, excludeAppointmentId?: number): Promise<Busy[]> {
   const appts = await query<{ start_time: string; end_time: string; client_name: string | null }>(
     `SELECT a.start_time, a.end_time, cl.name as client_name
      FROM appointments a
-     LEFT JOIN clients cl ON cl.id = a.client_id
+     LEFT JOIN clients cl ON cl.id = a.client_id AND EXISTS
+       (SELECT 1 FROM tenant_ownership co WHERE co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = ?)
+     JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id AND o.company_id = ?
      WHERE a.staff_id = ? AND a.scheduled_date = ? AND a.status != 'cancelled'
        ${excludeAppointmentId ? "AND a.id != ?" : ""}`,
-    excludeAppointmentId ? [staffId, date, excludeAppointmentId] : [staffId, date],
+    excludeAppointmentId ? [tenant(c), tenant(c), staffId, date, excludeAppointmentId] : [tenant(c), tenant(c), staffId, date],
   );
   const blocks = await query<{ start_time: string; end_time: string; reason: string | null }>(
-    "SELECT start_time, end_time, reason FROM blocked_slots WHERE staff_id = ? AND blocked_date = ?",
-    [staffId, date],
+    `SELECT b.start_time, b.end_time, b.reason FROM blocked_slots b JOIN tenant_ownership o
+      ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id AND o.company_id = ?
+      WHERE b.staff_id = ? AND b.blocked_date = ?`,
+    [tenant(c), staffId, date],
   );
   return [
     ...appts.map((a): Busy => ({
@@ -196,8 +371,9 @@ async function busyFor(staffId: number, date: string, excludeAppointmentId?: num
 }
 
 /** The staff member's name, for the conflict message. */
-async function staffName(staffId: number): Promise<string> {
-  const s = await get<{ name: string }>("SELECT name FROM staff WHERE id = ?", [staffId]);
+async function staffName(c: TenantContext, staffId: number): Promise<string> {
+  const s = await get<{ name: string }>(`SELECT s.name FROM staff s JOIN tenant_ownership o
+    ON o.resource_type = 'staff' AND o.resource_id = s.id WHERE s.id = ? AND o.company_id = ?`, [staffId, tenant(c)]);
   return s?.name || "";
 }
 
@@ -227,27 +403,32 @@ const getStats = createRoute({
 
 app.openapi(getStats, async (c) => {
   const today = new Date().toISOString().split("T")[0];
-  const appointments = await get<{ count: number }>("SELECT COUNT(*) as count FROM appointments");
-  const clients = await get<{ count: number }>("SELECT COUNT(*) as count FROM clients");
-  const staff = await get<{ count: number }>("SELECT COUNT(*) as count FROM staff WHERE active = 1");
-  const services = await get<{ count: number }>("SELECT COUNT(*) as count FROM services WHERE active = 1");
-  const products = await get<{ count: number }>("SELECT COUNT(*) as count FROM products");
-  const todayAppointments = await get<{ count: number }>("SELECT COUNT(*) as count FROM appointments WHERE scheduled_date = ?", [today]);
-  const upcomingAppointments = await get<{ count: number }>("SELECT COUNT(*) as count FROM appointments WHERE status IN ('booked', 'confirmed') AND scheduled_date >= ?", [today]);
-  const completedAppointments = await get<{ count: number }>("SELECT COUNT(*) as count FROM appointments WHERE status = 'completed'");
-  const completedServiceValue = await get<{ total: number }>("SELECT COALESCE(SUM(total_price), 0) as total FROM appointments WHERE status = 'completed'");
-  const lowStock = await get<{ count: number }>("SELECT COUNT(*) as count FROM products WHERE stock <= low_stock_alert");
+  const scoped = async (table: "appointments" | "clients" | "staff" | "services" | "products", expression: string, filter = "", args: unknown[] = []) => {
+    return get<{ value: number }>(`SELECT ${expression} AS value FROM ${table} t
+      JOIN tenant_ownership o ON o.resource_type = ? AND o.resource_id = t.id AND o.company_id = ? ${filter}`,
+      [table, tenant(c), ...args]);
+  };
+  const appointments = await scoped("appointments", "COUNT(*)");
+  const clients = await scoped("clients", "COUNT(*)");
+  const staff = await scoped("staff", "COUNT(*)", "WHERE t.active = 1");
+  const services = await scoped("services", "COUNT(*)", "WHERE t.active = 1");
+  const products = await scoped("products", "COUNT(*)");
+  const todayAppointments = await scoped("appointments", "COUNT(*)", "WHERE t.scheduled_date = ?", [today]);
+  const upcomingAppointments = await scoped("appointments", "COUNT(*)", "WHERE t.status IN ('booked', 'confirmed') AND t.scheduled_date >= ?", [today]);
+  const completedAppointments = await scoped("appointments", "COUNT(*)", "WHERE t.status = 'completed'");
+  const completedServiceValue = await scoped("appointments", "COALESCE(SUM(t.total_price), 0)", "WHERE t.status = 'completed'");
+  const lowStock = await scoped("products", "COUNT(*)", "WHERE t.stock <= t.low_stock_alert");
   return c.json({
-    appointments: appointments?.count || 0,
-    clients: clients?.count || 0,
-    staff: staff?.count || 0,
-    services: services?.count || 0,
-    products: products?.count || 0,
-    today_appointments: todayAppointments?.count || 0,
-    upcoming_appointments: upcomingAppointments?.count || 0,
-    completed_appointments: completedAppointments?.count || 0,
-    revenue: completedServiceValue?.total || 0,
-    low_stock_products: lowStock?.count || 0,
+    appointments: appointments?.value || 0,
+    clients: clients?.value || 0,
+    staff: staff?.value || 0,
+    services: services?.value || 0,
+    products: products?.value || 0,
+    today_appointments: todayAppointments?.value || 0,
+    upcoming_appointments: upcomingAppointments?.value || 0,
+    completed_appointments: completedAppointments?.value || 0,
+    revenue: completedServiceValue?.value || 0,
+    low_stock_products: lowStock?.value || 0,
   }, 200);
 });
 
@@ -280,8 +461,8 @@ app.openapi(listAppointments, async (c) => {
   const limit = parseInt(q.limit || "50", 10);
   const offset = (page - 1) * limit;
 
-  let where = "WHERE 1=1";
-  const params: unknown[] = [];
+  let where = "WHERE o.resource_type = 'appointments' AND o.company_id = ?";
+  const params: unknown[] = [tenant(c)];
 
   if (q.search) {
     where += " AND (a.identifier LIKE ? OR cl.name LIKE ?)";
@@ -293,7 +474,9 @@ app.openapi(listAppointments, async (c) => {
   if (q.staff_id) { where += " AND a.staff_id = ?"; params.push(q.staff_id); }
 
   const total = await get<{ count: number }>(
-    `SELECT COUNT(*) as count FROM appointments a LEFT JOIN clients cl ON cl.id = a.client_id ${where}`,
+    `SELECT COUNT(*) as count FROM appointments a JOIN tenant_ownership o ON o.resource_id = a.id
+     LEFT JOIN clients cl ON cl.id = a.client_id AND EXISTS (SELECT 1 FROM tenant_ownership co
+       WHERE co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = o.company_id) ${where}`,
     params,
   );
 
@@ -301,8 +484,11 @@ app.openapi(listAppointments, async (c) => {
     `SELECT a.*, cl.name as client_name, cl.phone as client_phone,
             s.name as staff_name, s.color as staff_color
      FROM appointments a
-     LEFT JOIN clients cl ON cl.id = a.client_id
-     LEFT JOIN staff s ON s.id = a.staff_id
+     JOIN tenant_ownership o ON o.resource_id = a.id
+     LEFT JOIN clients cl ON cl.id = a.client_id AND EXISTS (SELECT 1 FROM tenant_ownership co
+       WHERE co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = o.company_id)
+     LEFT JOIN staff s ON s.id = a.staff_id AND EXISTS (SELECT 1 FROM tenant_ownership so
+       WHERE so.resource_type = 'staff' AND so.resource_id = s.id AND so.company_id = o.company_id)
      ${where}
      ORDER BY a.scheduled_date DESC, a.start_time ASC
      LIMIT ? OFFSET ?`,
@@ -336,30 +522,37 @@ app.openapi(getCalendar, async (c) => {
     `SELECT a.*, cl.name as client_name, cl.phone as client_phone,
             s.name as staff_name, s.color as staff_color
      FROM appointments a
-     LEFT JOIN clients cl ON cl.id = a.client_id
-     LEFT JOIN staff s ON s.id = a.staff_id
+     JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id AND o.company_id = ?
+     LEFT JOIN clients cl ON cl.id = a.client_id AND EXISTS (SELECT 1 FROM tenant_ownership co
+       WHERE co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = o.company_id)
+     LEFT JOIN staff s ON s.id = a.staff_id AND EXISTS (SELECT 1 FROM tenant_ownership so
+       WHERE so.resource_type = 'staff' AND so.resource_id = s.id AND so.company_id = o.company_id)
      WHERE a.scheduled_date >= ? AND a.scheduled_date <= ? AND a.status != 'cancelled'
      ORDER BY a.start_time ASC`,
-    [start, end],
+    [tenant(c), start, end],
   );
 
   // Attach services to each appointment
   for (const apt of appointments) {
     const svcs = await query<Record<string, unknown>>(
       `SELECT aps.*, sv.name as service_name FROM appointment_services aps
-       LEFT JOIN services sv ON sv.id = aps.service_id
+       JOIN tenant_ownership o ON o.resource_type = 'appointment_services' AND o.resource_id = aps.id AND o.company_id = ?
+       LEFT JOIN services sv ON sv.id = aps.service_id AND EXISTS (SELECT 1 FROM tenant_ownership so
+         WHERE so.resource_type = 'services' AND so.resource_id = sv.id AND so.company_id = o.company_id)
        WHERE aps.appointment_id = ?`,
-      [apt.id],
+      [tenant(c), apt.id],
     );
     (apt as Record<string, unknown>).appointment_services = svcs;
   }
 
   const blocked = await query<Record<string, unknown>>(
     `SELECT b.*, s.name as staff_name FROM blocked_slots b
-     LEFT JOIN staff s ON s.id = b.staff_id
+     JOIN tenant_ownership o ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id AND o.company_id = ?
+     LEFT JOIN staff s ON s.id = b.staff_id AND EXISTS (SELECT 1 FROM tenant_ownership so
+       WHERE so.resource_type = 'staff' AND so.resource_id = s.id AND so.company_id = o.company_id)
      WHERE b.blocked_date >= ? AND b.blocked_date <= ?
      ORDER BY b.start_time ASC`,
-    [start, end],
+    [tenant(c), start, end],
   );
 
   return c.json({ appointments, blocked_slots: blocked }, 200);
@@ -381,28 +574,34 @@ const getAppointment = createRoute({
 
 app.openapi(getAppointment, async (c) => {
   const { id } = c.req.valid("param");
+  if (!(await owns(c, "appointments", id))) return c.json({ error: "No encontrado" }, 404);
   const apt = await get<Record<string, unknown>>(
     `SELECT a.*, cl.name as client_name, cl.phone as client_phone,
             s.name as staff_name, s.color as staff_color
      FROM appointments a
-     LEFT JOIN clients cl ON cl.id = a.client_id
-     LEFT JOIN staff s ON s.id = a.staff_id
+     LEFT JOIN clients cl ON cl.id = a.client_id AND EXISTS (SELECT 1 FROM tenant_ownership co
+       WHERE co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = ?)
+     LEFT JOIN staff s ON s.id = a.staff_id AND EXISTS (SELECT 1 FROM tenant_ownership so
+       WHERE so.resource_type = 'staff' AND so.resource_id = s.id AND so.company_id = ?)
      WHERE a.id = ?`,
-    [id],
+    [tenant(c), tenant(c), id],
   );
   if (!apt) return c.json({ error: "No encontrado" }, 404);
 
   const svcs = await query<Record<string, unknown>>(
     `SELECT aps.*, sv.name as service_name FROM appointment_services aps
-     LEFT JOIN services sv ON sv.id = aps.service_id
+     JOIN tenant_ownership o ON o.resource_type = 'appointment_services' AND o.resource_id = aps.id AND o.company_id = ?
+     LEFT JOIN services sv ON sv.id = aps.service_id AND EXISTS (SELECT 1 FROM tenant_ownership so
+       WHERE so.resource_type = 'services' AND so.resource_id = sv.id AND so.company_id = o.company_id)
      WHERE aps.appointment_id = ?`,
-    [id],
+    [tenant(c), id],
   );
   apt.appointment_services = svcs;
 
   const notes = await query<Record<string, unknown>>(
-    "SELECT * FROM appointment_notes WHERE appointment_id = ? ORDER BY created_at DESC",
-    [id],
+    `SELECT n.* FROM appointment_notes n JOIN tenant_ownership o ON o.resource_type = 'appointment_notes'
+       AND o.resource_id = n.id AND o.company_id = ? WHERE n.appointment_id = ? ORDER BY n.created_at DESC`,
+    [tenant(c), id],
   );
   apt.appointment_notes = notes;
 
@@ -437,7 +636,10 @@ const createAppointment = createRoute({
 
 app.openapi(createAppointment, async (c) => {
   const body = c.req.valid("json");
-  const identifier = await nextIdentifier();
+  if (!(await owns(c, "clients", body.client_id)) ||
+    (body.staff_id != null && !(await owns(c, "staff", body.staff_id)))) {
+    return c.json({ error: "Cliente o personal no encontrado" }, 400);
+  }
   const startTime = body.start_time ?? "09:00";
 
   // Calculate total duration and price from services
@@ -446,12 +648,14 @@ app.openapi(createAppointment, async (c) => {
   const serviceIds = body.service_ids || [];
 
   if (serviceIds.length > 0) {
-    const svcs = await query<{ duration: number; price: number }>(
-      `SELECT duration, price FROM services WHERE id IN (${serviceIds.map(() => "?").join(",")})`,
-      serviceIds,
-    );
-    totalDuration = svcs.reduce((sum, s) => sum + s.duration, 0);
-    totalPrice = svcs.reduce((sum, s) => sum + s.price, 0);
+    if (!(await Promise.all(serviceIds.map((id) => owns(c, "services", id)))).every(Boolean)) {
+      return c.json({ error: "Servicio no encontrado" }, 400);
+    }
+    const svcs = await Promise.all(serviceIds.map((id) => get<{ duration: number; price: number }>(
+      "SELECT duration, price FROM services WHERE id = ?", [id])));
+    if (svcs.some((svc) => !svc)) return c.json({ error: "Servicio no encontrado" }, 400);
+    totalDuration = svcs.reduce((sum, s) => sum + s!.duration, 0);
+    totalPrice = svcs.reduce((sum, s) => sum + s!.price, 0);
   }
 
   const start = toMinutes(startTime);
@@ -464,32 +668,40 @@ app.openapi(createAppointment, async (c) => {
 
   // Nothing to contend for when the booking is unassigned.
   if (body.staff_id && !body.allow_conflict) {
-    const conflicts = findConflicts(startTime, endTime, await busyFor(body.staff_id, body.scheduled_date));
+    const conflicts = findConflicts(startTime, endTime, await busyFor(c, body.staff_id, body.scheduled_date));
     if (conflicts.length > 0) {
-      return c.json({ error: describeConflicts(await staffName(body.staff_id), conflicts), conflicts }, 409);
+      return c.json({ error: describeConflicts(await staffName(c, body.staff_id), conflicts), conflicts }, 409);
     }
   }
 
-  const result = await run(
-    `INSERT INTO appointments (identifier, client_id, staff_id, scheduled_date, start_time, end_time, total_price, notes, is_recurring, recurrence_interval)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [identifier, body.client_id, body.staff_id ?? null, body.scheduled_date,
-    startTime, endTime, totalPrice,
-    body.notes || "", body.is_recurring || 0, body.recurrence_interval || ""],
-  );
-
-  const aptId = result.lastInsertRowid;
-
-  // Insert appointment services
+  const db = c.env.DB;
+  if (!db?.batch) return c.json({ error: "Se requieren transacciones D1" }, 503);
+  // Global identifier sequence remains unique across companies. Its increment,
+  // booking, links and ownership all commit in one D1 transaction.
+  const statements = [
+    db.prepare(`INSERT OR IGNORE INTO _meta (key, value)
+      SELECT 'appointment_counter', CAST(COALESCE(MAX(CAST(SUBSTR(identifier, 5) AS INTEGER)), 0) AS TEXT)
+      FROM appointments WHERE identifier GLOB 'APT-[0-9]*'`).bind(),
+    db.prepare("UPDATE _meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'appointment_counter'").bind(),
+    db.prepare(`INSERT INTO appointments (identifier, client_id, staff_id, scheduled_date, start_time, end_time, total_price, notes, is_recurring, recurrence_interval)
+      VALUES (COALESCE((SELECT value FROM _meta WHERE key = 'appointment_prefix'), 'APT') || '-' ||
+      (SELECT value FROM _meta WHERE key = 'appointment_counter'), ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      body.client_id, body.staff_id ?? null, body.scheduled_date, startTime, endTime, totalPrice,
+      body.notes || "", body.is_recurring || 0, body.recurrence_interval || ""),
+    db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('appointments', last_insert_rowid(), ?)").bind(tenant(c)),
+  ];
   for (const svcId of serviceIds) {
     const svc = await get<{ duration: number; price: number }>("SELECT duration, price FROM services WHERE id = ?", [svcId]);
-    if (svc) {
-      await run(
-        "INSERT INTO appointment_services (appointment_id, service_id, price, duration) VALUES (?, ?, ?, ?)",
-        [aptId, svcId, svc.price, svc.duration],
-      );
-    }
+    if (!svc) return c.json({ error: "Servicio no encontrado" }, 400);
+    statements.push(db.prepare(`INSERT INTO appointment_services (appointment_id, service_id, price, duration)
+      VALUES ((SELECT a.id FROM appointments a JOIN tenant_ownership o ON o.resource_type = 'appointments'
+        AND o.resource_id = a.id AND o.company_id = ? WHERE a.identifier =
+        COALESCE((SELECT value FROM _meta WHERE key = 'appointment_prefix'), 'APT') || '-' ||
+        (SELECT value FROM _meta WHERE key = 'appointment_counter')), ?, ?, ?)`).bind(tenant(c), svcId, svc.price, svc.duration));
+    statements.push(db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('appointment_services', last_insert_rowid(), ?)").bind(tenant(c)));
   }
+  const result = await db.batch(statements);
+  const aptId = Number((result[2].meta as { last_row_id?: number }).last_row_id);
 
   const apt = await get<Record<string, unknown>>(
     `SELECT a.*, cl.name as client_name, cl.phone as client_phone,
@@ -535,6 +747,11 @@ const updateAppointment = createRoute({
 app.openapi(updateAppointment, async (c) => {
   const { id } = c.req.valid("param");
   const { allow_conflict, ...body } = c.req.valid("json");
+  if (!(await owns(c, "appointments", id))) return c.json({ error: "No encontrado" }, 404);
+  if ((body.client_id !== undefined && !(await owns(c, "clients", body.client_id))) ||
+      (body.staff_id != null && !(await owns(c, "staff", body.staff_id)))) {
+    return c.json({ error: "Cliente o personal no encontrado" }, 400);
+  }
 
   const existing = await get<{
     staff_id: number | null; scheduled_date: string; start_time: string; end_time: string; status: string;
@@ -571,9 +788,9 @@ app.openapi(updateAppointment, async (c) => {
     if (end <= start) return c.json({ error: "El turno debe terminar después de comenzar en el mismo día" }, 400);
 
     if (status !== "cancelled" && staffId && !allow_conflict) {
-      const conflicts = findConflicts(startTime, endTime, await busyFor(staffId, date, Number(id)));
+      const conflicts = findConflicts(startTime, endTime, await busyFor(c, staffId, date, Number(id)));
       if (conflicts.length > 0) {
-        return c.json({ error: describeConflicts(await staffName(staffId), conflicts), conflicts }, 409);
+        return c.json({ error: describeConflicts(await staffName(c, staffId), conflicts), conflicts }, 409);
       }
     }
   }
@@ -584,7 +801,9 @@ app.openapi(updateAppointment, async (c) => {
     if (val !== undefined) { sets.push(`${key} = ?`); params.push(val); }
   }
   sets.push("updated_at = datetime('now')");
-  await run(`UPDATE appointments SET ${sets.join(", ")} WHERE id = ?`, [...params, id]);
+  await run(`UPDATE appointments SET ${sets.join(", ")} WHERE id = ? AND EXISTS
+    (SELECT 1 FROM tenant_ownership o WHERE o.resource_type = 'appointments' AND o.resource_id = appointments.id AND o.company_id = ?)`,
+    [...params, id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -593,12 +812,14 @@ const deleteAppointment = createRoute({
   method: "delete",
   path: "/api/appointments/{id}",
   request: { params: IdParam },
-  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(deleteAppointment, async (c) => {
   const { id } = c.req.valid("param");
-  await run("DELETE FROM appointments WHERE id = ?", [id]);
+  if (!(await owns(c, "appointments", id))) return c.json({ error: "No encontrado" }, 404);
+  await run(`DELETE FROM appointments WHERE id = ? AND EXISTS (SELECT 1 FROM tenant_ownership o
+    WHERE o.resource_type = 'appointments' AND o.resource_id = appointments.id AND o.company_id = ?)`, [id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -610,13 +831,14 @@ const addAppointmentNote = createRoute({
     params: IdParam,
     body: { content: { "application/json": { schema: z.object({ content: z.string() }) } } },
   },
-  responses: { 201: { description: "Note added", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 201: { description: "Note added", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(addAppointmentNote, async (c) => {
   const { id } = c.req.valid("param");
   const { content } = c.req.valid("json");
-  await run("INSERT INTO appointment_notes (appointment_id, content) VALUES (?, ?)", [id, content]);
+  if (!(await owns(c, "appointments", id))) return c.json({ error: "No encontrado" }, 404);
+  await insertOwned(c, "appointment_notes", "INSERT INTO appointment_notes (appointment_id, content) VALUES (?, ?)", [id, content]);
   return c.json({ ok: true }, 201);
 });
 
@@ -624,12 +846,14 @@ const deleteNote = createRoute({
   method: "delete",
   path: "/api/notes/{id}",
   request: { params: IdParam },
-  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(deleteNote, async (c) => {
   const { id } = c.req.valid("param");
-  await run("DELETE FROM appointment_notes WHERE id = ?", [id]);
+  if (!(await owns(c, "appointment_notes", id))) return c.json({ error: "No encontrado" }, 404);
+  await run(`DELETE FROM appointment_notes WHERE id = ? AND EXISTS (SELECT 1 FROM tenant_ownership o
+    WHERE o.resource_type = 'appointment_notes' AND o.resource_id = appointment_notes.id AND o.company_id = ?)`, [id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -659,18 +883,20 @@ app.openapi(listClients, async (c) => {
   const limit = parseInt(q.limit || "50", 10);
   const offset = (page - 1) * limit;
 
-  let where = "WHERE 1=1";
-  const params: unknown[] = [];
+  let where = "WHERE o.resource_type = 'clients' AND o.company_id = ?";
+  const params: unknown[] = [tenant(c)];
   if (q.search) {
     where += " AND (c.name LIKE ? OR c.email LIKE ? OR c.phone LIKE ?)";
     const s = `%${q.search}%`;
     params.push(s, s, s);
   }
 
-  const total = await get<{ count: number }>(`SELECT COUNT(*) as count FROM clients c ${where}`, params);
+  const total = await get<{ count: number }>(`SELECT COUNT(*) as count FROM clients c JOIN tenant_ownership o ON o.resource_id = c.id ${where}`, params);
   const clients = await query<Record<string, unknown>>(
-    `SELECT c.*, (SELECT COUNT(*) FROM appointments WHERE client_id = c.id) as appointment_count
-     FROM clients c ${where} ORDER BY c.name ASC LIMIT ? OFFSET ?`,
+    `SELECT c.*, (SELECT COUNT(*) FROM appointments a JOIN tenant_ownership ao
+       ON ao.resource_type = 'appointments' AND ao.resource_id = a.id AND ao.company_id = o.company_id
+       WHERE a.client_id = c.id) as appointment_count
+     FROM clients c JOIN tenant_ownership o ON o.resource_id = c.id ${where} ORDER BY c.name ASC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
 
@@ -689,7 +915,8 @@ const getAllClients = createRoute({
 });
 
 app.openapi(getAllClients, async (c) => {
-  const clients = await query<{ id: number; name: string }>("SELECT id, name FROM clients ORDER BY name ASC");
+  const clients = await query<{ id: number; name: string }>(`SELECT c.id, c.name FROM clients c JOIN tenant_ownership o
+    ON o.resource_type = 'clients' AND o.resource_id = c.id WHERE o.company_id = ? ORDER BY c.name ASC`, [tenant(c)]);
   return c.json({ clients }, 200);
 });
 
@@ -708,26 +935,34 @@ const getClient = createRoute({
 
 app.openapi(getClient, async (c) => {
   const { id } = c.req.valid("param");
+  if (!(await owns(c, "clients", id))) return c.json({ error: "No encontrado" }, 404);
   const client = await get<Record<string, unknown>>("SELECT * FROM clients WHERE id = ?", [id]);
   if (!client) return c.json({ error: "No encontrado" }, 404);
   const appointments = await query<Record<string, unknown>>(
     `SELECT a.*, s.name as staff_name, s.color as staff_color,
             (SELECT GROUP_CONCAT(name, ', ')
              FROM (
-               SELECT sv.name
-               FROM appointment_services aps
-               JOIN services sv ON sv.id = aps.service_id
+                SELECT sv.name
+                FROM appointment_services aps
+                JOIN tenant_ownership aso ON aso.resource_type = 'appointment_services'
+                  AND aso.resource_id = aps.id AND aso.company_id = ?
+                JOIN services sv ON sv.id = aps.service_id
+               JOIN tenant_ownership so ON so.resource_type = 'services' AND so.resource_id = sv.id AND so.company_id = ?
                WHERE aps.appointment_id = a.id
                ORDER BY aps.id
              )) as service_names,
             (SELECT an.content
              FROM appointment_notes an
+             JOIN tenant_ownership no ON no.resource_type = 'appointment_notes' AND no.resource_id = an.id AND no.company_id = ?
              WHERE an.appointment_id = a.id
              ORDER BY an.created_at DESC, an.id DESC
              LIMIT 1) as latest_note
-     FROM appointments a LEFT JOIN staff s ON s.id = a.staff_id
-     WHERE a.client_id = ? ORDER BY a.scheduled_date DESC LIMIT 50`,
-    [id],
+     FROM appointments a
+     JOIN tenant_ownership ao ON ao.resource_type = 'appointments' AND ao.resource_id = a.id AND ao.company_id = ?
+      LEFT JOIN staff s ON s.id = a.staff_id AND EXISTS (SELECT 1 FROM tenant_ownership sto
+        WHERE sto.resource_type = 'staff' AND sto.resource_id = s.id AND sto.company_id = ao.company_id)
+      WHERE a.client_id = ? ORDER BY a.scheduled_date DESC LIMIT 50`,
+    [tenant(c), tenant(c), tenant(c), tenant(c), id],
   );
   return c.json({ client, appointments }, 200);
 });
@@ -748,11 +983,11 @@ const createClient = createRoute({
 
 app.openapi(createClient, async (c) => {
   const body = c.req.valid("json");
-  const result = await run(
+  const id = await insertOwned(c, "clients",
     "INSERT INTO clients (name, email, phone, notes) VALUES (?, ?, ?, ?)",
     [body.name, body.email || "", body.phone || "", body.notes || ""],
   );
-  const client = await get<Record<string, unknown>>("SELECT * FROM clients WHERE id = ?", [result.lastInsertRowid]);
+  const client = await get<Record<string, unknown>>("SELECT * FROM clients WHERE id = ?", [id]);
   return c.json({ client }, 201);
 });
 
@@ -768,11 +1003,12 @@ const updateClient = createRoute({
       notes: z.string().optional(),
     }) } } },
   },
-  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(updateClient, async (c) => {
   const { id } = c.req.valid("param");
+  if (!(await owns(c, "clients", id))) return c.json({ error: "No encontrado" }, 404);
   const body = c.req.valid("json");
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -781,7 +1017,8 @@ app.openapi(updateClient, async (c) => {
   }
   if (sets.length > 0) {
     sets.push("updated_at = datetime('now')");
-    await run(`UPDATE clients SET ${sets.join(", ")} WHERE id = ?`, [...params, id]);
+    await run(`UPDATE clients SET ${sets.join(", ")} WHERE id = ? AND EXISTS
+      (SELECT 1 FROM tenant_ownership o WHERE o.resource_type = 'clients' AND o.resource_id = clients.id AND o.company_id = ?)`, [...params, id, tenant(c)]);
   }
   return c.json({ ok: true }, 200);
 });
@@ -790,12 +1027,14 @@ const deleteClient = createRoute({
   method: "delete",
   path: "/api/clients/{id}",
   request: { params: IdParam },
-  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(deleteClient, async (c) => {
   const { id } = c.req.valid("param");
-  await run("DELETE FROM clients WHERE id = ?", [id]);
+  if (!(await owns(c, "clients", id))) return c.json({ error: "No encontrado" }, 404);
+  await run(`DELETE FROM clients WHERE id = ? AND EXISTS (SELECT 1 FROM tenant_ownership o
+    WHERE o.resource_type = 'clients' AND o.resource_id = clients.id AND o.company_id = ?)`, [id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -819,9 +1058,12 @@ app.openapi(listStaff, async (c) => {
             COALESCE(SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END), 0) as completed_appointment_count,
             COALESCE(SUM(CASE WHEN a.status = 'completed' THEN a.total_price ELSE 0 END), 0) as completed_service_value
      FROM staff s
-     LEFT JOIN appointments a ON a.staff_id = s.id
+     JOIN tenant_ownership o ON o.resource_type = 'staff' AND o.resource_id = s.id AND o.company_id = ?
+     LEFT JOIN appointments a ON a.staff_id = s.id AND EXISTS
+       (SELECT 1 FROM tenant_ownership ao WHERE ao.resource_type = 'appointments' AND ao.resource_id = a.id AND ao.company_id = o.company_id)
      GROUP BY s.id
      ORDER BY s.name ASC`,
+    [tenant(c)],
   );
   return c.json({ staff }, 200);
 });
@@ -838,7 +1080,9 @@ const getAllStaff = createRoute({
 });
 
 app.openapi(getAllStaff, async (c) => {
-  const staff = await query<{ id: number; name: string; color: string }>("SELECT id, name, color FROM staff WHERE active = 1 ORDER BY name ASC");
+  const staff = await query<{ id: number; name: string; color: string }>(`SELECT s.id, s.name, s.color FROM staff s
+    JOIN tenant_ownership o ON o.resource_type = 'staff' AND o.resource_id = s.id
+    WHERE o.company_id = ? AND s.active = 1 ORDER BY s.name ASC`, [tenant(c)]);
   return c.json({ staff }, 200);
 });
 
@@ -859,11 +1103,11 @@ const createStaff = createRoute({
 
 app.openapi(createStaff, async (c) => {
   const body = c.req.valid("json");
-  const result = await run(
+  const id = await insertOwned(c, "staff",
     "INSERT INTO staff (name, email, phone, title, color) VALUES (?, ?, ?, ?, ?)",
     [body.name, body.email || "", body.phone || "", body.title || "", body.color || "#7c3aed"],
   );
-  const staff = await get<Record<string, unknown>>("SELECT * FROM staff WHERE id = ?", [result.lastInsertRowid]);
+  const staff = await get<Record<string, unknown>>("SELECT * FROM staff WHERE id = ?", [id]);
   return c.json({ staff }, 201);
 });
 
@@ -881,11 +1125,12 @@ const updateStaff = createRoute({
       active: z.number().int().optional(),
     }) } } },
   },
-  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(updateStaff, async (c) => {
   const { id } = c.req.valid("param");
+  if (!(await owns(c, "staff", id))) return c.json({ error: "No encontrado" }, 404);
   const body = c.req.valid("json");
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -893,7 +1138,8 @@ app.openapi(updateStaff, async (c) => {
     if (val !== undefined) { sets.push(`${key} = ?`); params.push(val); }
   }
   if (sets.length > 0) {
-    await run(`UPDATE staff SET ${sets.join(", ")} WHERE id = ?`, [...params, id]);
+    await run(`UPDATE staff SET ${sets.join(", ")} WHERE id = ? AND EXISTS
+      (SELECT 1 FROM tenant_ownership o WHERE o.resource_type = 'staff' AND o.resource_id = staff.id AND o.company_id = ?)`, [...params, id, tenant(c)]);
   }
   return c.json({ ok: true }, 200);
 });
@@ -902,12 +1148,14 @@ const deleteStaff = createRoute({
   method: "delete",
   path: "/api/staff/{id}",
   request: { params: IdParam },
-  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(deleteStaff, async (c) => {
   const { id } = c.req.valid("param");
-  await run("DELETE FROM staff WHERE id = ?", [id]);
+  if (!(await owns(c, "staff", id))) return c.json({ error: "No encontrado" }, 404);
+  await run(`DELETE FROM staff WHERE id = ? AND EXISTS (SELECT 1 FROM tenant_ownership o
+    WHERE o.resource_type = 'staff' AND o.resource_id = staff.id AND o.company_id = ?)`, [id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -925,7 +1173,9 @@ const listServices = createRoute({
 });
 
 app.openapi(listServices, async (c) => {
-  const services = await query<Record<string, unknown>>("SELECT * FROM services ORDER BY category ASC, name ASC");
+  const services = await query<Record<string, unknown>>(`SELECT s.* FROM services s JOIN tenant_ownership o
+    ON o.resource_type = 'services' AND o.resource_id = s.id WHERE o.company_id = ?
+    ORDER BY s.category ASC, s.name ASC`, [tenant(c)]);
   return c.json({ services }, 200);
 });
 
@@ -947,11 +1197,11 @@ const createService = createRoute({
 
 app.openapi(createService, async (c) => {
   const body = c.req.valid("json");
-  const result = await run(
+  const id = await insertOwned(c, "services",
     "INSERT INTO services (name, description, duration, price, color, category) VALUES (?, ?, ?, ?, ?, ?)",
     [body.name, body.description || "", body.duration || 60, body.price || 0, body.color || "#6b7280", body.category || ""],
   );
-  const service = await get<Record<string, unknown>>("SELECT * FROM services WHERE id = ?", [result.lastInsertRowid]);
+  const service = await get<Record<string, unknown>>("SELECT * FROM services WHERE id = ?", [id]);
   return c.json({ service }, 201);
 });
 
@@ -970,11 +1220,12 @@ const updateService = createRoute({
       active: z.number().int().optional(),
     }) } } },
   },
-  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(updateService, async (c) => {
   const { id } = c.req.valid("param");
+  if (!(await owns(c, "services", id))) return c.json({ error: "No encontrado" }, 404);
   const body = c.req.valid("json");
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -982,7 +1233,8 @@ app.openapi(updateService, async (c) => {
     if (val !== undefined) { sets.push(`${key} = ?`); params.push(val); }
   }
   if (sets.length > 0) {
-    await run(`UPDATE services SET ${sets.join(", ")} WHERE id = ?`, [...params, id]);
+    await run(`UPDATE services SET ${sets.join(", ")} WHERE id = ? AND EXISTS
+      (SELECT 1 FROM tenant_ownership o WHERE o.resource_type = 'services' AND o.resource_id = services.id AND o.company_id = ?)`, [...params, id, tenant(c)]);
   }
   return c.json({ ok: true }, 200);
 });
@@ -991,12 +1243,14 @@ const deleteService = createRoute({
   method: "delete",
   path: "/api/services/{id}",
   request: { params: IdParam },
-  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(deleteService, async (c) => {
   const { id } = c.req.valid("param");
-  await run("DELETE FROM services WHERE id = ?", [id]);
+  if (!(await owns(c, "services", id))) return c.json({ error: "No encontrado" }, 404);
+  await run(`DELETE FROM services WHERE id = ? AND EXISTS (SELECT 1 FROM tenant_ownership o
+    WHERE o.resource_type = 'services' AND o.resource_id = services.id AND o.company_id = ?)`, [id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -1026,6 +1280,7 @@ const createBlockedSlot = createRoute({
 
 app.openapi(createBlockedSlot, async (c) => {
   const { allow_conflict, ...body } = c.req.valid("json");
+  if (!(await owns(c, "staff", body.staff_id))) return c.json({ error: "Personal no encontrado" }, 400);
   const start = toMinutes(body.start_time);
   const end = toMinutes(body.end_time);
   if (start === null || end === null) return c.json({ error: "Los horarios deben tener formato HH:MM" }, 400);
@@ -1035,14 +1290,14 @@ app.openapi(createBlockedSlot, async (c) => {
     const conflicts = findConflicts(
       body.start_time,
       body.end_time,
-      await busyFor(body.staff_id, body.blocked_date),
+      await busyFor(c, body.staff_id, body.blocked_date),
     );
     if (conflicts.length > 0) {
-      return c.json({ error: describeConflicts(await staffName(body.staff_id), conflicts, "block"), conflicts }, 409);
+      return c.json({ error: describeConflicts(await staffName(c, body.staff_id), conflicts, "block"), conflicts }, 409);
     }
   }
 
-  await run(
+  await insertOwned(c, "blocked_slots",
     "INSERT INTO blocked_slots (staff_id, blocked_date, start_time, end_time, reason) VALUES (?, ?, ?, ?, ?)",
     [body.staff_id, body.blocked_date, body.start_time, body.end_time, body.reason || ""],
   );
@@ -1053,12 +1308,14 @@ const deleteBlockedSlot = createRoute({
   method: "delete",
   path: "/api/blocked-slots/{id}",
   request: { params: IdParam },
-  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(deleteBlockedSlot, async (c) => {
   const { id } = c.req.valid("param");
-  await run("DELETE FROM blocked_slots WHERE id = ?", [id]);
+  if (!(await owns(c, "blocked_slots", id))) return c.json({ error: "No encontrado" }, 404);
+  await run(`DELETE FROM blocked_slots WHERE id = ? AND EXISTS (SELECT 1 FROM tenant_ownership o
+    WHERE o.resource_type = 'blocked_slots' AND o.resource_id = blocked_slots.id AND o.company_id = ?)`, [id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 
@@ -1089,8 +1346,8 @@ app.openapi(listProducts, async (c) => {
   const limit = parseInt(q.limit || "50", 10);
   const offset = (page - 1) * limit;
 
-  let where = "WHERE 1=1";
-  const params: unknown[] = [];
+  let where = "WHERE o.resource_type = 'products' AND o.company_id = ?";
+  const params: unknown[] = [tenant(c)];
   if (q.search) {
     where += " AND (p.name LIKE ? OR p.brand LIKE ? OR p.sku LIKE ?)";
     const s = `%${q.search}%`;
@@ -1098,9 +1355,9 @@ app.openapi(listProducts, async (c) => {
   }
   if (q.category) { where += " AND p.category = ?"; params.push(q.category); }
 
-  const total = await get<{ count: number }>(`SELECT COUNT(*) as count FROM products p ${where}`, params);
+  const total = await get<{ count: number }>(`SELECT COUNT(*) as count FROM products p JOIN tenant_ownership o ON o.resource_id = p.id ${where}`, params);
   const products = await query<Record<string, unknown>>(
-    `SELECT * FROM products p ${where} ORDER BY p.name ASC LIMIT ? OFFSET ?`,
+    `SELECT p.* FROM products p JOIN tenant_ownership o ON o.resource_id = p.id ${where} ORDER BY p.name ASC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
 
@@ -1127,12 +1384,12 @@ const createProduct = createRoute({
 
 app.openapi(createProduct, async (c) => {
   const body = c.req.valid("json");
-  const result = await run(
+  const id = await insertOwned(c, "products",
     "INSERT INTO products (name, brand, category, sku, price, cost, stock, low_stock_alert) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     [body.name, body.brand || "", body.category || "", body.sku || "",
     body.price ?? 0, body.cost ?? 0, body.stock ?? 0, body.low_stock_alert ?? 5],
   );
-  const product = await get<Record<string, unknown>>("SELECT * FROM products WHERE id = ?", [result.lastInsertRowid]);
+  const product = await get<Record<string, unknown>>("SELECT * FROM products WHERE id = ?", [id]);
   return c.json({ product }, 201);
 });
 
@@ -1152,11 +1409,12 @@ const updateProduct = createRoute({
       low_stock_alert: z.number().int().min(0).optional(),
     }) } } },
   },
-  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(updateProduct, async (c) => {
   const { id } = c.req.valid("param");
+  if (!(await owns(c, "products", id))) return c.json({ error: "No encontrado" }, 404);
   const body = c.req.valid("json");
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -1165,7 +1423,8 @@ app.openapi(updateProduct, async (c) => {
   }
   if (sets.length > 0) {
     sets.push("updated_at = datetime('now')");
-    await run(`UPDATE products SET ${sets.join(", ")} WHERE id = ?`, [...params, id]);
+    await run(`UPDATE products SET ${sets.join(", ")} WHERE id = ? AND EXISTS
+      (SELECT 1 FROM tenant_ownership o WHERE o.resource_type = 'products' AND o.resource_id = products.id AND o.company_id = ?)`, [...params, id, tenant(c)]);
   }
   return c.json({ ok: true }, 200);
 });
@@ -1174,12 +1433,14 @@ const deleteProduct = createRoute({
   method: "delete",
   path: "/api/products/{id}",
   request: { params: IdParam },
-  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } } },
+  responses: { 200: { description: "Deleted", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(deleteProduct, async (c) => {
   const { id } = c.req.valid("param");
-  await run("DELETE FROM products WHERE id = ?", [id]);
+  if (!(await owns(c, "products", id))) return c.json({ error: "No encontrado" }, 404);
+  await run(`DELETE FROM products WHERE id = ? AND EXISTS (SELECT 1 FROM tenant_ownership o
+    WHERE o.resource_type = 'products' AND o.resource_id = products.id AND o.company_id = ?)`, [id, tenant(c)]);
   return c.json({ ok: true }, 200);
 });
 

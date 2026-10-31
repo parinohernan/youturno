@@ -6,11 +6,17 @@ export class ApiError extends Error {
   }
 }
 
+let csrfToken: string | null = null;
+export function setCsrfToken(token: string | null): void { csrfToken = token; }
+
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = { method, headers: {} };
   if (body) {
     (opts.headers as Record<string, string>)["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
+  }
+  if (!["GET", "HEAD"].includes(method) && csrfToken) {
+    (opts.headers as Record<string, string>)["X-CSRF-Token"] = csrfToken;
   }
   const r = await fetch(path, opts);
   const text = await r.text();

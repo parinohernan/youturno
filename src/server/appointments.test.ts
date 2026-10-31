@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { before, test } from "node:test";
+import { signToken } from "./auth.ts";
 
 // Bundle the real routes with Vite's own bundler, then exercise them against
 // SQLite through the same StorageBinding contract used by the hosted app.
@@ -24,15 +25,37 @@ async function setup(t: { after: (fn: () => void) => void }) {
   t.after(() => db.close());
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
-  const env = { STORAGE: { async query(sql: string, params: any[] = []) {
-    const stmt = db.prepare(sql);
-    if (stmt.columns().length) return { rows: stmt.all(...params) };
-    const result = stmt.run(...params);
-    return { rows: [], meta: { changes: result.changes, last_row_id: Number(result.lastInsertRowid) } };
-  } } };
+  // Route tests explicitly provision fixtures; requests never seed production data.
+  db.exec(`
+    INSERT INTO clients (id, name) VALUES (1, 'Jamie Rivera'), (2, 'Casey Morgan');
+    INSERT INTO staff (id, name) VALUES (1, 'Alex'), (2, 'Jordan');
+    INSERT INTO services (id, name, duration, price) VALUES
+      (1, 'Corte de pelo', 60, 50), (2, 'Corte + barba', 30, 30);
+  `);
+  db.exec(readFileSync(new URL("./migrate-legacy.sql", import.meta.url), "utf8"));
+  db.prepare("INSERT INTO users (email, password_hash, role, company_id) VALUES ('owner@example.test', 'test-only', 'tenant', 1)").run();
+  const secret = "test-only-secret-at-least-32-characters-long";
+  const token = await signToken(secret, 1, 0);
+  const env = { AUTH_SECRET: secret, DB: {
+    prepare(sql: string) {
+      return { bind(...params: any[]) {
+        const stmt = db.prepare(sql);
+        return {
+          async first() { return stmt.get(...params) ?? null; },
+          async all() { return { results: stmt.all(...params) }; },
+          async run() { const result = stmt.run(...params); return { meta: { changes: result.changes, last_row_id: Number(result.lastInsertRowid) } }; },
+        };
+      } };
+    },
+    async batch(statements: { run: () => Promise<unknown> }[]) {
+      db.exec("BEGIN");
+      try { const results = []; for (const stmt of statements) results.push(await stmt.run()); db.exec("COMMIT"); return results; }
+      catch (error) { db.exec("ROLLBACK"); throw error; }
+    },
+  } };
   const call = async (method: string, path: string, body?: object) => {
     const response = await app.request(path, {
-      method, headers: { "content-type": "application/json" },
+      method, headers: { "content-type": "application/json", origin: "http://localhost", cookie: `__Host-youturno=${token.jwt}`, "x-csrf-token": token.csrf },
       ...(body ? { body: JSON.stringify(body) } : {}),
     }, env);
     return { status: response.status, body: await response.json() };
@@ -101,6 +124,7 @@ test("blocked time rejects new and moved appointments", async (t) => {
   const { create, update, db } = await setup(t);
   const first = await create(); // also runs the application's seed middleware
   db.prepare("INSERT INTO blocked_slots (staff_id, blocked_date, start_time, end_time, reason) VALUES (1, '2026-09-14', '13:00', '14:00', 'Lunch')").run();
+  db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('blocked_slots', last_insert_rowid(), 1)").run();
   const blocked = await create({ start_time: "13:00" });
   assert.equal(blocked.status, 409);
   assert.equal(blocked.body.conflicts[0].kind, "blocked");
@@ -128,6 +152,7 @@ test("blocked time reports every clash and requires an explicit override", async
   const { call, create, db } = await setup(t);
   await create({ start_time: "12:30" });
   db.prepare("INSERT INTO blocked_slots (staff_id, blocked_date, start_time, end_time, reason) VALUES (1, '2026-09-14', '12:00', '12:15', 'Break')").run();
+  db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('blocked_slots', last_insert_rowid(), 1)").run();
   const block = (patch: object = {}) => call("POST", "/api/blocked-slots", {
     staff_id: 1, blocked_date: "2026-09-14", start_time: "12:00", end_time: "13:00", reason: "Closure", ...patch,
   });
@@ -262,4 +287,14 @@ test("legacy invalid times do not prevent cancellation or metadata repair", asyn
   assert.equal((await update(id, { status: "cancelled" })).status, 200);
   assert.equal((await update(id, { status: "booked" })).status, 400);
   assert.equal((await update(id, { status: "booked", end_time: "11:00" })).status, 200);
+});
+
+test("a second company does not disable the existing tenant's business routes", async (t) => {
+  const { db, call } = await setup(t);
+  db.prepare("INSERT INTO companies (name, status) VALUES ('Second company', 'pending')").run();
+  assert.equal((await call("GET", "/api/clients")).status, 200);
+  assert.equal((await call("GET", "/api/stats")).status, 200);
+  assert.equal((await call("POST", "/api/clients", { name: "Tenant write" })).status, 201);
+  assert.equal((await call("DELETE", "/api/clients/1")).status, 200);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM clients").get()?.count, 2);
 });
