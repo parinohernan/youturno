@@ -1,13 +1,25 @@
 import { AppNav, embedded } from "@clawnify/app/client";
 import { useEffect, useState } from "preact/hooks";
 import { useApp } from "../context";
-import { Scissors, Menu, LayoutDashboard, CalendarDays, Clock, Users, UserCog, Sparkles, Package } from "lucide-preact";
+import { Menu, LayoutDashboard, CalendarDays, Clock, Users, UserCog, Sparkles, Package } from "lucide-preact";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { View } from "../types";
+
+// YouTurno mark: two intersecting circles — gold "yo" and black "tu".
+export function Mark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <circle cx="64" cy="90" r="52" fill="#d4af37" />
+      <circle cx="116" cy="90" r="52" fill="#111111" />
+      <text x="38" y="92" textAnchor="middle" dominantBaseline="central" fontFamily="system-ui, 'Segoe UI', sans-serif" fontSize="44" fontWeight="700" fill="#111111">yo</text>
+      <text x="142" y="92" textAnchor="middle" dominantBaseline="central" fontFamily="system-ui, 'Segoe UI', sans-serif" fontSize="44" fontWeight="700" fill="#ffffff">tu</text>
+    </svg>
+  );
+}
 
 const navItems: { view: View; path: string; label: string; icon: typeof LayoutDashboard }[] = [
   { view: "dashboard", path: "/", label: "Panel de inicio", icon: LayoutDashboard },
@@ -25,10 +37,8 @@ function SidebarContent({ currentView, onNavigate }: { currentView: View; onNavi
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar">
       <div className="flex items-center gap-2 px-4 py-5">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-          <Scissors className="h-4 w-4" />
-        </div>
-        <span className="text-base font-semibold text-sidebar-foreground">Gestor de salón</span>
+        <Mark className="h-18 w-18 shrink-0" />
+        <span className="text-base font-semibold text-sidebar-foreground">YouTurno</span>
       </div>
       <Separator />
       <nav aria-label="Navegación principal" className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-3">
@@ -110,8 +120,8 @@ export function Sidebar({ currentView }: { currentView: View }) {
       </aside>
       <header className="flex shrink-0 items-center justify-between gap-3 border-b bg-sidebar px-4 py-2 md:hidden">
         <span className="flex items-center gap-2 text-sm font-semibold">
-          <Scissors className="h-4 w-4 text-primary" />
-          Gestor de salón
+          <Mark className="h-4 w-4" />
+          YouTurno
         </span>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>

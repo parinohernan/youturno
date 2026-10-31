@@ -1,8 +1,7 @@
 <svg viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg">
-  <rect width="180" height="180" rx="20%" fill="#7c3aed"/>
-  <!-- Scissors -->
-  <circle cx="72" cy="120" r="16" fill="none" stroke="#fff" stroke-width="6"/>
-  <circle cx="108" cy="120" r="16" fill="none" stroke="#fff" stroke-width="6"/>
-  <line x1="84" y1="108" x2="108" y2="56" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
-  <line x1="96" y1="108" x2="72" y2="56" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+  <!-- YouTurno mark: two intersecting circles, "yo" + "tu" -->
+  <circle cx="64" cy="90" r="52" fill="#d4af37"/>
+  <circle cx="116" cy="90" r="52" fill="#111111"/>
+  <text x="38" y="92" text-anchor="middle" dominant-baseline="central" font-family="system-ui, 'Segoe UI', sans-serif" font-size="44" font-weight="700" fill="#111111">yo</text>
+  <text x="142" y="92" text-anchor="middle" dominant-baseline="central" font-family="system-ui, 'Segoe UI', sans-serif" font-size="44" font-weight="700" fill="#ffffff">tu</text>
 </svg>
