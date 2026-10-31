@@ -1,15 +1,17 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
-import { Plus, Trash2 } from "lucide-preact";
+import { Plus, Trash2, Pencil } from "lucide-preact";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { CreateStaff } from "./create-staff";
 import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
+import type { Staff } from "../types";
 
 export function StaffList() {
   const { staffMembers, deleteStaff, updateStaff } = useApp();
   const [showCreate, setShowCreate] = useState(false);
+  const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
 
   return (
     <div className="space-y-4 p-4 sm:p-6">
@@ -24,6 +26,7 @@ export function StaffList() {
       </p>
 
       {showCreate && <CreateStaff onClose={() => setShowCreate(false)} />}
+      {editingStaff && <CreateStaff staff={editingStaff} onClose={() => setEditingStaff(null)} />}
 
       <Card>
         <CardContent className="p-0">
@@ -53,7 +56,10 @@ export function StaffList() {
                   <div><dt className="text-sm text-muted-foreground">Completados</dt><dd className="font-semibold tabular-nums">{s.completed_appointment_count || 0}</dd></div>
                   <div><dt className="text-sm text-muted-foreground">Valor de servicios</dt><dd className="font-semibold tabular-nums">{formatMoney(s.completed_service_value || 0)}</dd></div>
                 </dl>
-                <div className="mt-4 grid grid-cols-2 gap-2">
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <Button variant="outline" className="min-h-11" onClick={() => setEditingStaff(s)}>
+                    <Pencil className="mr-1.5 h-3.5 w-3.5" /> Editar
+                  </Button>
                   <Button variant="outline" className="min-h-11" onClick={() => updateStaff(s.id, { active: s.active ? 0 : 1 })}>
                     {s.active ? "Desactivar" : "Activar"}
                   </Button>
@@ -105,6 +111,9 @@ export function StaffList() {
                       <div className="flex justify-end gap-2">
                         <Button variant="outline" size="sm" onClick={() => updateStaff(s.id, { active: s.active ? 0 : 1 })}>
                           {s.active ? "Desactivar" : "Activar"}
+                        </Button>
+                        <Button aria-label={`Editar ${s.name}`} variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => setEditingStaff(s)}>
+                          <Pencil className="h-3.5 w-3.5" />
                         </Button>
                         <Button aria-label={`Eliminar ${s.name}`} variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={() => deleteStaff(s.id)}>
                           <Trash2 className="h-3.5 w-3.5" />

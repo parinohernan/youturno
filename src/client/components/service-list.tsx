@@ -1,16 +1,18 @@
 import { useState } from "preact/hooks";
 import { useApp } from "../context";
-import { Plus, Trash2 } from "lucide-preact";
+import { Plus, Trash2, Pencil } from "lucide-preact";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { CreateService } from "./create-service";
 import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
+import type { Service } from "../types";
 
 export function ServiceList() {
   const { services, deleteService, updateService } = useApp();
   const [showCreate, setShowCreate] = useState(false);
+  const [editingService, setEditingService] = useState<Service | null>(null);
 
   const categories = [...new Set(services.map((s) => s.category).filter(Boolean))];
 
@@ -24,6 +26,7 @@ export function ServiceList() {
       </div>
 
       {showCreate && <CreateService onClose={() => setShowCreate(false)} />}
+      {editingService && <CreateService service={editingService} onClose={() => setEditingService(null)} />}
 
       <Card>
         <CardContent className="p-0">
@@ -36,7 +39,7 @@ export function ServiceList() {
                 <TableHead className="w-24 text-center">Duración</TableHead>
                 <TableHead className="w-20 text-right">Precio</TableHead>
                 <TableHead className="w-20">Estado</TableHead>
-                <TableHead className="w-10" />
+                <TableHead className="w-20" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -66,9 +69,14 @@ export function ServiceList() {
                     </button>
                   </TableCell>
                   <TableCell>
-                    <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={() => deleteService(svc.id)}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button aria-label={`Editar ${svc.name}`} variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={() => setEditingService(svc)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={() => deleteService(svc.id)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}

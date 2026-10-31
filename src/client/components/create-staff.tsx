@@ -5,23 +5,27 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { strings } from "@/lib/strings";
+import type { Staff } from "../types";
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#ef4444", "#14b8a6", "#f97316"];
 
-export function CreateStaff({ onClose }: { onClose: () => void }) {
-  const { addStaff, setError } = useApp();
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [title, setTitle] = useState("");
-  const [color, setColor] = useState(COLORS[0]);
+export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: Staff }) {
+  const { addStaff, updateStaff, setError } = useApp();
+  const [name, setName] = useState(staff?.name || "");
+  const [email, setEmail] = useState(staff?.email || "");
+  const [phone, setPhone] = useState(staff?.phone || "");
+  const [title, setTitle] = useState(staff?.title || "");
+  const [color, setColor] = useState(staff?.color || COLORS[0]);
   const [saving, setSaving] = useState(false);
+  const isEditing = staff !== undefined;
 
   const handleSubmit = async () => {
     if (!name.trim()) { setError(strings.nameRequired); return; }
     setSaving(true);
     try {
-      await addStaff({ name: name.trim(), email, phone, title, color });
+      const data = { name: name.trim(), email, phone, title, color };
+      if (staff) await updateStaff(staff.id, data);
+      else await addStaff(data);
       onClose();
     } catch (err) {
       setError((err as Error).message);
@@ -34,7 +38,7 @@ export function CreateStaff({ onClose }: { onClose: () => void }) {
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Agregar integrante</DialogTitle>
+          <DialogTitle>{isEditing ? "Editar integrante" : "Agregar integrante"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
@@ -71,7 +75,7 @@ export function CreateStaff({ onClose }: { onClose: () => void }) {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button disabled={saving} onClick={handleSubmit}>{saving ? strings.saving : "Agregar integrante"}</Button>
+          <Button disabled={saving} onClick={handleSubmit}>{saving ? strings.saving : isEditing ? strings.saveChanges : "Agregar integrante"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
