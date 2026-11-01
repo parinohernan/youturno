@@ -46,6 +46,7 @@ export function StaffList() {
                       {!s.active && <span className="rounded-md bg-secondary px-2 py-0.5 text-sm text-secondary-foreground">Inactivo</span>}
                     </div>
                     <p className="text-sm text-muted-foreground">{s.title || "Sin rol asignado"}</p>
+                    <p className="text-xs text-muted-foreground">{s.working_hours == null ? "Hereda el horario de la empresa" : "Horario semanal personalizado"}</p>
                     {(s.email || s.phone) && (
                       <p className="break-words text-sm text-muted-foreground">{[s.email, s.phone].filter(Boolean).join(" · ")}</p>
                     )}
@@ -100,6 +101,7 @@ export function StaffList() {
                             {!s.active && <span className="rounded-md bg-secondary px-2 py-0.5 text-sm text-secondary-foreground">Inactivo</span>}
                           </div>
                           <p className="text-sm text-muted-foreground">{s.email || s.phone || "Sin datos de contacto"}</p>
+                          <p className="text-xs text-muted-foreground">{s.working_hours == null ? "Hereda el horario de la empresa" : "Horario semanal personalizado"}</p>
                         </div>
                       </div>
                     </TableCell>

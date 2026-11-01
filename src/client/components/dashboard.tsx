@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { today } from "@/lib/dates";
 import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
+import { BookingLinkCard } from "@/components/booking-link-card";
 
 export function Dashboard() {
   const { stats, navigate, calendarAppointments } = useApp();
@@ -98,6 +99,8 @@ export function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      <BookingLinkCard />
     </div>
   );
 }

@@ -15,11 +15,23 @@ import { StaffList } from "./components/staff-list";
 import { ServiceList } from "./components/service-list";
 import { ProductList } from "./components/product-list";
 import { ErrorBanner } from "./components/error-banner";
+import { BookPublic } from "./components/book-public";
 
 type Session = { email: string; role: "superadmin" | "tenant"; company_id: number | null;
   company_name: string | null; company_status: string | null; csrf: string };
 
+/** /book/{slug} — public booking lives outside the tenant session gate. */
+function publicBookingSlug(): string | null {
+  const match = window.location.pathname.match(/^\/book\/([a-z0-9-]+)\/?$/);
+  return match ? match[1] : null;
+}
+
 export function App() {
+  const bookingSlug = publicBookingSlug();
+  return bookingSlug ? <BookPublic key={bookingSlug} slug={bookingSlug} /> : <StaffApp />;
+}
+
+function StaffApp() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

@@ -2,6 +2,10 @@ const encoder = new TextEncoder();
 const COOKIE = "__Host-youturno";
 const ITERATIONS = 600_000;
 const SESSION_SECONDS = 8 * 60 * 60;
+export const CUSTOMER_COOKIE = "yt_book";
+export const CUSTOMER_STATE_COOKIE = "yt_oauth";
+export const CUSTOMER_SECONDS = 30 * 24 * 60 * 60;
+const STATE_SECONDS = 10 * 60;
 
 function encode(bytes: Uint8Array): string {
   return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""))
@@ -76,3 +80,67 @@ export async function verifyToken(secret: string, jwt: string): Promise<Token | 
 
 export function safeEqual(a: string, b: string): boolean { return equal(a, b); }
 export { COOKIE };
+
+export type CustomerClaims = { sub: string; email: string; name: string; iat: number; exp: number };
+
+/** One-time OAuth nonce, base64url like every other signed value here. */
+export function randomNonce(): string {
+  return encode(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+async function hmac(secret: string, message: string): Promise<string> {
+  const signature = new Uint8Array(await crypto.subtle.sign("HMAC", await keyFrom(secret), encoder.encode(message)));
+  return encode(signature);
+}
+
+/** Same construction as `signToken`, with a `typ` that keeps the two cookie families distinct. */
+async function signPayload(secret: string, typ: string, claims: Record<string, string>, lifetime: number): Promise<string> {
+  const iat = Math.floor(Date.now() / 1000);
+  const body: Record<string, unknown> = { ...claims, iat, exp: iat + lifetime };
+  const header = encode(encoder.encode(JSON.stringify({ alg: "HS256", typ })));
+  const payload = encode(encoder.encode(JSON.stringify(body)));
+  const message = `${header}.${payload}`;
+  return `${message}.${await hmac(secret, message)}`;
+}
+
+async function verifyPayload<T>(
+  secret: string, typ: string, token: string, lifetime: number, claimsValid: (claims: T & { iat: number; exp: number }) => boolean,
+): Promise<(T & { iat: number; exp: number }) | null> {
+  const parts = token.split(".");
+  if (parts.length !== 3 || token.length > 4096) return null;
+  try {
+    const [header, payload, signature] = parts;
+    const head = JSON.parse(new TextDecoder().decode(decode(header)));
+    const claims = JSON.parse(new TextDecoder().decode(decode(payload))) as T & { iat: number; exp: number };
+    const now = Math.floor(Date.now() / 1000);
+    if (head.alg !== "HS256" || head.typ !== typ || !Number.isSafeInteger(claims.iat) || claims.iat > now + 60 ||
+      !Number.isSafeInteger(claims.exp) || claims.exp <= now || claims.exp - claims.iat !== lifetime) return null;
+    if (!claimsValid(claims)) return null;
+    const valid = await crypto.subtle.verify("HMAC", await keyFrom(secret), decode(signature).buffer as ArrayBuffer, encoder.encode(`${header}.${payload}`));
+    return valid ? claims : null;
+  } catch { return null; }
+}
+
+export type CustomerSession = { sub: string; email: string; name: string };
+
+/** The signed customer identity stored in the public booking cookie. */
+export async function signCustomerToken(secret: string, customer: CustomerSession): Promise<string> {
+  return signPayload(secret, "CUSTOMER", { sub: customer.sub, email: customer.email, name: customer.name }, CUSTOMER_SECONDS);
+}
+
+export async function verifyCustomerToken(secret: string, jwt: string): Promise<CustomerClaims | null> {
+  return verifyPayload<CustomerClaims>(secret, "CUSTOMER", jwt, CUSTOMER_SECONDS, (claims) =>
+    claims.sub.length > 0 && claims.email.includes("@") && claims.name.length <= 200);
+}
+
+export type OAuthState = { n: string; s: string };
+
+/** The signed `state` parameter echoed by Google's consent redirect. */
+export async function signCustomerState(secret: string, state: OAuthState): Promise<string> {
+  return signPayload(secret, "CUSTOMER-OAUTH-STATE", { n: state.n, s: state.s }, STATE_SECONDS);
+}
+
+export async function verifyCustomerState(secret: string, token: string): Promise<OAuthState | null> {
+  return verifyPayload<OAuthState>(secret, "CUSTOMER-OAUTH-STATE", token, STATE_SECONDS, (state) =>
+    state.n.length > 0 && state.s.length > 0);
+}

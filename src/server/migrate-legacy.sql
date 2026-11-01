@@ -42,3 +42,8 @@ INSERT OR IGNORE INTO _meta (key, value) VALUES ('appointment_prefix', 'APT');
 INSERT OR IGNORE INTO _meta (key, value)
 SELECT 'appointment_counter', CAST(COALESCE(MAX(CAST(SUBSTR(identifier, 5) AS INTEGER)), 0) AS TEXT)
 FROM appointments WHERE identifier GLOB 'APT-[0-9]*';
+
+-- Existing company tables need introspection-derived additive upgrades, not
+-- unconditional ALTER statements. Preview with pnpm migrate:local; stop the dev
+-- server, then apply with --apply --backup /absolute/path/to/new-backup.sql.
+-- scripts/public-booking-migration.mjs backs up before schema/column/data work.

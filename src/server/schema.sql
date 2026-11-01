@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS staff (
   title TEXT DEFAULT '',
   color TEXT NOT NULL DEFAULT '#7c3aed',
   active INTEGER NOT NULL DEFAULT 1,
+  working_hours TEXT DEFAULT NULL,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -105,8 +106,24 @@ CREATE TABLE IF NOT EXISTS _meta (
 CREATE TABLE IF NOT EXISTS companies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
+  -- Public booking link. NULL while the owner has not chosen one; several
+  -- companies may stay unlisted side by side.
+  slug TEXT UNIQUE,
+  -- Weekday-to-window JSON, e.g. {"mon":["09:00","18:00"],"sun":null}.
+  business_hours TEXT NOT NULL DEFAULT '{"mon":["09:00","18:00"],"tue":["09:00","18:00"],"wed":["09:00","18:00"],"thu":["09:00","18:00"],"fri":["09:00","18:00"],"sat":["09:00","18:00"],"sun":null}',
   status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Federated Google identities for public bookings. One row per (provider,
+-- provider account); `email` mirrors the verified address of that account.
+CREATE TABLE IF NOT EXISTS oauth_identities (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  provider_account_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  display_name TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE(provider, provider_account_id)
 );
 CREATE TABLE IF NOT EXISTS tenant_ownership (
   resource_type TEXT NOT NULL CHECK (resource_type IN (
@@ -118,6 +135,31 @@ CREATE TABLE IF NOT EXISTS tenant_ownership (
   PRIMARY KEY (resource_type, resource_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_ownership_company ON tenant_ownership(company_id, resource_type);
+-- Explicit qualifications only: legacy staff deliberately receive no mappings.
+CREATE TABLE IF NOT EXISTS staff_services (
+  company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+  service_id INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  PRIMARY KEY (company_id, staff_id, service_id)
+);
+CREATE INDEX IF NOT EXISTS idx_staff_services_service ON staff_services(company_id, service_id, staff_id);
+CREATE TRIGGER IF NOT EXISTS check_staff_service_owner BEFORE INSERT ON staff_services
+BEGIN
+  SELECT RAISE(ABORT, 'staff service must belong to company') WHERE NOT EXISTS (
+    SELECT 1 FROM tenant_ownership st JOIN tenant_ownership sv ON sv.resource_type = 'services'
+      AND sv.resource_id = NEW.service_id AND sv.company_id = st.company_id
+    WHERE st.resource_type = 'staff' AND st.resource_id = NEW.staff_id AND st.company_id = NEW.company_id);
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_staff_service BEFORE UPDATE ON staff_services
+BEGIN
+  SELECT RAISE(ABORT, 'staff service mapping is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS clean_staff_service_ownership AFTER DELETE ON tenant_ownership
+BEGIN
+  DELETE FROM staff_services WHERE company_id = OLD.company_id AND
+    ((OLD.resource_type = 'staff' AND staff_id = OLD.resource_id) OR
+     (OLD.resource_type = 'services' AND service_id = OLD.resource_id));
+END;
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -161,6 +203,78 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   failures INTEGER NOT NULL DEFAULT 0,
   locked_until INTEGER NOT NULL DEFAULT 0
 );
+-- An admission row is inserted and removed in the public booking D1 batch.
+-- The trigger sees the latest committed schedule, not an earlier HTTP read.
+-- Staff's explicit allow_conflict policy is intentionally unaffected.
+CREATE TABLE IF NOT EXISTS public_booking_admission (
+  id TEXT PRIMARY KEY,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  staff_id INTEGER NOT NULL REFERENCES staff(id),
+  service_id INTEGER REFERENCES services(id),
+  scheduled_date TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS admit_public_booking BEFORE INSERT ON public_booking_admission
+BEGIN
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE NOT EXISTS (
+    SELECT 1 FROM staff s JOIN tenant_ownership o ON o.resource_type = 'staff' AND o.resource_id = s.id
+    JOIN companies c ON c.id = o.company_id
+    WHERE s.id = NEW.staff_id AND s.active = 1 AND c.id = NEW.company_id AND c.status = 'active');
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE EXISTS (
+    SELECT 1 FROM appointments a JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+    WHERE o.company_id = NEW.company_id AND a.staff_id = NEW.staff_id AND a.scheduled_date = NEW.scheduled_date
+      AND a.status != 'cancelled' AND a.start_time < NEW.end_time AND a.end_time > NEW.start_time);
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE EXISTS (
+    SELECT 1 FROM blocked_slots b JOIN tenant_ownership o ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id
+    WHERE o.company_id = NEW.company_id AND b.staff_id = NEW.staff_id AND b.blocked_date = NEW.scheduled_date
+      AND b.start_time < NEW.end_time AND b.end_time > NEW.start_time);
+END;
+-- Public-only qualification guard; manual tenant bookings retain their policy.
+CREATE TRIGGER IF NOT EXISTS admit_public_booking_service_v1 BEFORE INSERT ON public_booking_admission
+BEGIN
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE NOT EXISTS (
+    SELECT 1 FROM staff_services ss
+    JOIN services sv ON sv.id = ss.service_id AND sv.active = 1
+    JOIN tenant_ownership so ON so.resource_type = 'services' AND so.resource_id = sv.id AND so.company_id = ss.company_id
+    WHERE ss.company_id = NEW.company_id AND ss.staff_id = NEW.staff_id AND ss.service_id = NEW.service_id);
+END;
+-- The additional guard is versioned so upgrading an existing database installs
+-- it without replacing the conflict/ownership trigger. Legacy pairs stay valid.
+CREATE TRIGGER IF NOT EXISTS admit_public_booking_hours_v1 BEFORE INSERT ON public_booking_admission
+BEGIN
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE NEW.start_time >= NEW.end_time;
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE NOT EXISTS (
+    WITH source AS (
+      SELECT CASE WHEN json_valid(c.business_hours) THEN c.business_hours ELSE '{}' END AS hours,
+        '$.' || CASE strftime('%w', NEW.scheduled_date)
+          WHEN '0' THEN 'sun' WHEN '1' THEN 'mon' WHEN '2' THEN 'tue'
+          WHEN '3' THEN 'wed' WHEN '4' THEN 'thu' WHEN '5' THEN 'fri' WHEN '6' THEN 'sat' END AS path
+      FROM companies c WHERE c.id = NEW.company_id
+    ), day AS (SELECT json_extract(hours, path) AS intervals FROM source)
+    SELECT 1 FROM day, json_each(CASE WHEN json_type(intervals, '$[0]') = 'text'
+      THEN json_array(json(intervals)) ELSE intervals END) AS interval
+    WHERE json_extract(interval.value, '$[0]') <= NEW.start_time
+      AND json_extract(interval.value, '$[1]') >= NEW.end_time
+  );
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE NOT EXISTS (
+    WITH source AS (
+      SELECT CASE WHEN json_valid(s.working_hours) THEN s.working_hours ELSE '{}' END AS hours,
+        s.working_hours IS NULL AS inherit,
+        s.working_hours IS NULL OR json_valid(s.working_hours) AS valid,
+        '$.' || CASE strftime('%w', NEW.scheduled_date)
+          WHEN '0' THEN 'sun' WHEN '1' THEN 'mon' WHEN '2' THEN 'tue'
+          WHEN '3' THEN 'wed' WHEN '4' THEN 'thu' WHEN '5' THEN 'fri' WHEN '6' THEN 'sat' END AS path
+      FROM staff s WHERE s.id = NEW.staff_id
+    ), day AS (SELECT *, json_extract(hours, path) AS intervals FROM source)
+    SELECT 1 FROM day WHERE valid AND (inherit OR (json_type(hours) = 'object' AND json_type(hours, path) IS NULL))
+    UNION ALL
+    SELECT 1 FROM day, json_each(CASE WHEN json_type(intervals, '$[0]') = 'text'
+      THEN json_array(json(intervals)) ELSE intervals END) AS interval
+    WHERE valid AND json_extract(interval.value, '$[0]') <= NEW.start_time
+      AND json_extract(interval.value, '$[1]') >= NEW.end_time
+  );
+END;
 -- Cascading SQLite deletes also fire these triggers, so sidecar rows cannot
 -- outlive a deleted resource and be mistaken for a future resource ID.
 CREATE TRIGGER IF NOT EXISTS clean_client_ownership AFTER DELETE ON clients BEGIN

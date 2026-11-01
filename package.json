@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm migrate:local && concurrently -n ui,api -c cyan,green \"vite\" \"wrangler dev --port 8787\"",
-    "migrate:local": "wrangler d1 execute youturno-db --local --file=src/server/schema.sql && wrangler d1 execute youturno-db --local --file=src/server/migrate-legacy.sql",
+    "dev": "concurrently -n ui,api -c cyan,green \"vite\" \"wrangler dev --port 8787\"",
+    "migrate:local": "node scripts/public-booking-migration.mjs",
     "bootstrap:local": "node --experimental-strip-types scripts/bootstrap-superadmin.mjs",
     "build": "vite build",
     "test": "node --experimental-strip-types --test 'src/**/*.test.ts'"

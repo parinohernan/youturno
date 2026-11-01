@@ -54,7 +54,10 @@ export interface Client {
   updated_at: string;
 }
 
+export type WeeklyHours = Record<string, [string, string][] | [string, string] | null>;
+
 export interface Staff {
+  service_ids: number[];
   id: number;
   name: string;
   email: string;
@@ -62,6 +65,7 @@ export interface Staff {
   title: string;
   color: string;
   active: number;
+  working_hours?: WeeklyHours | null;
   appointment_count?: number;
   completed_appointment_count?: number;
   completed_service_value?: number;
