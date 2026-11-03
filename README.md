@@ -55,6 +55,20 @@ The migration is additive and repeatable: it adds `companies` and `tenant_owners
 
 For an existing deployment, back up first, then apply `src/server/schema.sql` followed by `src/server/migrate-legacy.sql` using that deployment's own D1 migration procedure.
 
+### Company social links upgrade
+
+Existing databases need `companies.social_links` before running the updated API. For a VPS using this repository's Wrangler **local D1** runtime, stop its API and run from the project directory, preserving its existing `.wrangler` state:
+
+```bash
+pnpm migrate:local
+umask 077
+pnpm migrate:local --apply --backup /absolute/private/path/new-social-links-backup.sql
+```
+
+The first command previews changes; the second exports and verifies a new nonempty backup before applying missing columns and additive schema. Restart the API afterward. The script is local-only: do not pass `--remote`. If the deployment uses a different database runtime, use its own backup/migration tooling to inspect `PRAGMA table_info(companies)` and, only if missing, apply `ALTER TABLE companies ADD COLUMN social_links TEXT NOT NULL DEFAULT '{}';` before updating the API. Applying `schema.sql` alone does not upgrade an existing table. VPS updates are the operator's responsibility.
+
+The company profile supports optional Instagram, Facebook, TikTok, YouTube and LinkedIn links. URLs must use HTTP(S), contain no username/password, and fit within 500 characters after trimming; HTTPS is recommended. Links are ordinary public outbound links, without embedded content or social SDKs. Profile updates preserve omitted fields; an empty social-link string removes that network, and `social_links: {}` clears all networks. Other social keys are rejected.
+
 ## Tech Stack
 
 | Layer | Technology |

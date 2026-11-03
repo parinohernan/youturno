@@ -109,10 +109,32 @@ CREATE TABLE IF NOT EXISTS companies (
   -- Public booking link. NULL while the owner has not chosen one; several
   -- companies may stay unlisted side by side.
   slug TEXT UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  address TEXT NOT NULL DEFAULT '',
+  phone TEXT NOT NULL DEFAULT '',
+  public_email TEXT NOT NULL DEFAULT '',
+  social_links TEXT NOT NULL DEFAULT '{}',
+  website TEXT NOT NULL DEFAULT '',
   -- Weekday-to-window JSON, e.g. {"mon":["09:00","18:00"],"sun":null}.
   business_hours TEXT NOT NULL DEFAULT '{"mon":["09:00","18:00"],"tue":["09:00","18:00"],"wed":["09:00","18:00"],"thu":["09:00","18:00"],"fri":["09:00","18:00"],"sat":["09:00","18:00"],"sun":null}',
   status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Logos are bounded, validated raster bytes, never external URLs or SVG.
+-- Appearance and cover publish in one statement; an absent row uses client/server defaults.
+CREATE TABLE IF NOT EXISTS company_booking_appearance (
+  company_id INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+  settings TEXT NOT NULL,
+  bytes BLOB,
+  content_type TEXT,
+  revision TEXT
+);
+
+CREATE TABLE IF NOT EXISTS company_logos (
+  company_id INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+  bytes BLOB NOT NULL CHECK (typeof(bytes) = 'blob' AND length(bytes) BETWEEN 1 AND 524288),
+  content_type TEXT NOT NULL CHECK (content_type IN ('image/png', 'image/jpeg')),
+  revision TEXT NOT NULL
 );
 -- Federated Google identities for public bookings. One row per (provider,
 -- provider account); `email` mirrors the verified address of that account.

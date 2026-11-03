@@ -12,8 +12,10 @@ export function setCsrfToken(token: string | null): void { csrfToken = token; }
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = { method, headers: {} };
   if (body) {
-    (opts.headers as Record<string, string>)["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body);
+    if (!(body instanceof FormData)) {
+      (opts.headers as Record<string, string>)["Content-Type"] = body instanceof Blob ? body.type : "application/json";
+    }
+    opts.body = body instanceof Blob || body instanceof FormData ? body : JSON.stringify(body);
   }
   if (!["GET", "HEAD"].includes(method) && csrfToken) {
     (opts.headers as Record<string, string>)["X-CSRF-Token"] = csrfToken;

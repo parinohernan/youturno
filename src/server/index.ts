@@ -1,5 +1,8 @@
 import { createApp, createRoute, z } from "@clawnify/app";
 import { query, get, run } from "./db.js";
+import { safeSocialUrl } from "../shared/social-links.js";
+import { boundedBody, BodyTooLarge, MAX_LOGO_BYTES, validLogo } from "./company-logo.js";
+import { appearanceError, readAppearance, isColor } from "../shared/booking-appearance.js";
 import { findConflicts, describeConflicts, toMinutes, slotStarts, minutesToTime, parseBusinessHours, windowsOnDate, effectiveWindows, effectiveWeeklyHours, fitsWindows, normalizeHours, weekdayOf, type Busy } from "./scheduling.js";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { COOKIE, CUSTOMER_COOKIE, CUSTOMER_STATE_COOKIE, CUSTOMER_SECONDS, hashPassword, verifyPassword,
@@ -7,7 +10,7 @@ import { COOKIE, CUSTOMER_COOKIE, CUSTOMER_STATE_COOKIE, CUSTOMER_SECONDS, hashP
   safeEqual, type Token, type CustomerClaims } from "./auth.js";
 
 type Actor = { id: number; email: string; role: "superadmin" | "tenant"; company_id: number | null; session_version: number; company_name: string | null; company_status: string | null };
-type D1Statement = { bind(...values: (number | string | null)[]): D1Statement };
+type D1Statement = { bind(...values: (number | string | null | Uint8Array)[]): D1Statement };
 type D1Database = { prepare(sql: string): D1Statement; batch(statements: D1Statement[]): Promise<{ meta: { changes: number } }[]> };
 type Env = { Bindings: { DB: D1Database; AUTH_SECRET: string; APP_ORIGIN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string }; Variables: { actor: Actor; claims: Token; customer: CustomerClaims } };
 
@@ -35,7 +38,11 @@ app.use("/api/*", async (c, next) => {
   if (!c.env.AUTH_SECRET || c.env.AUTH_SECRET.length < 32) return c.json({ error: "Servicio no configurado" }, 503);
   const path = new URL(c.req.url).pathname;
   const mutation = !["GET", "HEAD", "OPTIONS"].includes(c.req.method);
-  if (mutation && (!originAllowed(c) || !c.req.header("content-type")?.toLowerCase().startsWith("application/json"))) {
+  const logoUpload = path === "/api/company/logo" && c.req.method === "PUT" &&
+    ["image/png", "image/jpeg"].includes(c.req.header("content-type")?.toLowerCase() ?? "");
+  const appearanceUpload = path === "/api/company/appearance" && c.req.method === "PUT" &&
+    c.req.header("content-type")?.toLowerCase().startsWith("multipart/form-data;");
+  if (mutation && (!originAllowed(c) || (!logoUpload && !appearanceUpload && !c.req.header("content-type")?.toLowerCase().startsWith("application/json")))) {
     return c.json({ error: "Origen o formato no permitido" }, 403);
   }
   if (path === "/api/auth/login") return next();
@@ -135,9 +142,24 @@ function appBase(c: { req: { url: string }; env: Env["Bindings"] }): string | nu
 }
 
 /** Company row bookable through `slug`, or null when unknown or not active. */
-async function companyBySlug(slug: string): Promise<{ id: number; name: string; slug: string; business_hours: string } | null> {
-  return await get<{ id: number; name: string; slug: string; business_hours: string }>(
-    "SELECT id, name, slug, business_hours FROM companies WHERE slug = ? AND status = 'active'", [slug]) ?? null;
+type CompanyProfile = { id: number; name: string; slug: string; business_hours: string; social_links: string;
+  description: string; address: string; phone: string; public_email: string; website: string; logo_revision: string | null;
+  appearance_settings: string | null; cover_revision: string | null };
+const profileColumns = `id, name, slug, business_hours, description, address, phone, public_email, website, social_links,
+  (SELECT settings FROM company_booking_appearance WHERE company_id = companies.id) AS appearance_settings,
+  (SELECT revision FROM company_booking_appearance WHERE company_id = companies.id) AS cover_revision,
+  (SELECT revision FROM company_logos WHERE company_id = companies.id) AS logo_revision`;
+async function companyBySlug(slug: string): Promise<CompanyProfile | null> {
+  return await get<CompanyProfile>(
+    `SELECT ${profileColumns} FROM companies WHERE slug = ? AND status = 'active'`, [slug]) ?? null;
+}
+
+function publicProfile(company: CompanyProfile) {
+  return { description: company.description, address: company.address, phone: company.phone,
+    appearance: readAppearance(company.appearance_settings),
+    cover_url: company.slug && company.cover_revision ? `/api/public/${encodeURIComponent(company.slug)}/cover?v=${encodeURIComponent(company.cover_revision)}` : null,
+    public_email: company.public_email, website: company.website, social_links: JSON.parse(company.social_links),
+    logo_url: company.slug && company.logo_revision ? `/api/public/${encodeURIComponent(company.slug)}/logo?v=${encodeURIComponent(company.logo_revision)}` : null };
 }
 
 /** Only explicitly qualified active staff participate in public slot math. */
@@ -1677,6 +1699,145 @@ app.openapi(deleteProduct, async (c) => {
 
 const SlugParam = z.object({ slug: z.string().min(1).max(120).openapi({ description: "Public booking slug" }) });
 
+const optionalText = (max: number) => z.string().trim().max(max);
+const socialUrlInput = optionalText(500).refine((value) => !value || safeSocialUrl(value) !== null,
+  "Use una URL http:// o https:// sin usuario ni contraseña.").optional();
+const socialLinksInput = z.object({ instagram: socialUrlInput, facebook: socialUrlInput, tiktok: socialUrlInput,
+  youtube: socialUrlInput, linkedin: socialUrlInput }).strict();
+const profileInput = z.object({
+  name: z.string().trim().min(2).max(120),
+  description: optionalText(500), address: optionalText(300), phone: optionalText(40),
+  public_email: optionalText(254).refine((value) => !value || z.string().email().safeParse(value).success),
+  website: optionalText(500).refine((value) => {
+    if (!value) return true;
+    try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password; }
+    catch { return false; }
+  }),
+  social_links: socialLinksInput,
+}).partial().strict();
+
+app.get("/api/company/profile", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
+  const company = await get<CompanyProfile>(`SELECT ${profileColumns} FROM companies WHERE id = ?`, [tenant(c)]);
+  if (!company) return c.json({ error: "Empresa no encontrada" }, 404);
+  return c.json({ name: company.name, ...publicProfile(company), business_hours: JSON.parse(company.business_hours),
+    logo_url: company.logo_revision ? `/api/company/logo?v=${encodeURIComponent(company.logo_revision)}` : null,
+    cover_url: company.cover_revision ? `/api/company/cover?v=${encodeURIComponent(company.cover_revision)}` : null });
+});
+
+const appearanceInput = z.object({
+  background: z.string().refine(isColor), text: z.string().refine(isColor), button: z.string().refine(isColor),
+  welcome: z.string().max(500),
+}).strict();
+
+app.get("/api/company/appearance", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
+  const row = await get<{ settings: string; revision: string | null }>(
+    "SELECT settings, revision FROM company_booking_appearance WHERE company_id = ?", [tenant(c)]);
+  return c.json({ appearance: readAppearance(row?.settings),
+    cover_url: row?.revision ? `/api/company/cover?v=${encodeURIComponent(row.revision)}` : null });
+});
+
+app.put("/api/company/appearance", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
+  let form: FormData;
+  try {
+    // Bound the entire wire body before parsing multipart; Content-Length alone is not trusted.
+    const bytes = await boundedBody(c.req.raw, MAX_LOGO_BYTES + 16384);
+    form = await new Response(new Uint8Array(bytes), { headers: { "Content-Type": c.req.header("content-type") || "" } }).formData();
+  } catch (error) {
+    return c.json({ error: error instanceof BodyTooLarge ? "La solicitud supera el tamaño permitido" : "Formulario inválido" }, error instanceof BodyTooLarge ? 413 : 400);
+  }
+  for (const key of form.keys()) {
+    if (!["settings", "cover_action", "cover"].includes(key) || form.getAll(key).length !== 1)
+      return c.json({ error: "Campos inválidos" }, 400);
+  }
+  let input: unknown;
+  try { input = JSON.parse(String(form.get("settings"))); } catch { return c.json({ error: "Datos inválidos" }, 400); }
+  const parsed = appearanceInput.safeParse(input);
+  if (!parsed.success) return c.json({ error: "Colores o mensaje inválidos" }, 400);
+  const invalid = appearanceError(parsed.data);
+  if (invalid) return c.json({ error: invalid }, 400);
+  const action = form.get("cover_action") ?? "preserve";
+  if (!["preserve", "remove", "replace"].includes(String(action))) return c.json({ error: "Acción inválida" }, 400);
+  const cover = form.get("cover");
+  let image: Uint8Array | null = null;
+  let mime: string | null = null;
+  if (action === "replace") {
+    if (!cover || typeof cover === "string" || cover.size > MAX_LOGO_BYTES) return c.json({ error: "Seleccione un PNG o JPEG de hasta 512 KB" }, 400);
+    image = new Uint8Array(await cover.arrayBuffer()); mime = cover.type;
+    if (!validLogo(image, mime)) return c.json({ error: "Imagen inválida. Use PNG o JPEG de hasta 512 KB y 4096 × 4096 píxeles." }, 400);
+  } else if (cover !== null) return c.json({ error: "Imagen inesperada" }, 400);
+  // A single D1 statement atomically publishes metadata and cover, preserving an omitted cover.
+  await c.env.DB.batch([c.env.DB.prepare(`INSERT INTO company_booking_appearance
+    (company_id, settings, bytes, content_type, revision) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(company_id) DO UPDATE SET settings = excluded.settings,
+      bytes = CASE WHEN ? = 'preserve' THEN company_booking_appearance.bytes ELSE excluded.bytes END,
+      content_type = CASE WHEN ? = 'preserve' THEN company_booking_appearance.content_type ELSE excluded.content_type END,
+      revision = CASE WHEN ? = 'preserve' THEN company_booking_appearance.revision ELSE excluded.revision END`)
+    .bind(tenant(c), JSON.stringify(parsed.data), image, mime, action === "replace" ? crypto.randomUUID() : null,
+      String(action), String(action), String(action))]);
+  return c.json({ ok: true });
+});
+
+app.put("/api/company/profile", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
+  let input: unknown;
+  try { input = JSON.parse(new TextDecoder().decode(await boundedBody(c.req.raw, 8192))); }
+  catch (error) { return c.json({ error: error instanceof BodyTooLarge ? "El perfil supera el tamaño permitido" : "Datos inválidos" }, error instanceof BodyTooLarge ? 413 : 400); }
+  const parsed = profileInput.safeParse(input);
+  if (!parsed.success) return c.json({ error: "Datos inválidos. Use enlaces http:// o https:// sin usuario ni contraseña (máximo 500 caracteres); revise también los demás campos." }, 400);
+  const p = parsed.data;
+  const socialPatch = p.social_links === undefined ? null : JSON.stringify(Object.fromEntries(
+    Object.entries(p.social_links).map(([key, value]) => [key, value || null])));
+  // One statement updates the complete public profile atomically; hours and logo have separate saves.
+  await run(`UPDATE companies SET name = COALESCE(?, name), description = COALESCE(?, description),
+    address = COALESCE(?, address), phone = COALESCE(?, phone), public_email = COALESCE(?, public_email),
+    website = COALESCE(?, website), social_links = CASE WHEN ? IS NULL THEN social_links
+      WHEN ? = '{}' THEN '{}' ELSE json_patch(social_links, ?) END WHERE id = ?`,
+    [p.name ?? null, p.description ?? null, p.address ?? null, p.phone ?? null, p.public_email ?? null, p.website ?? null,
+      socialPatch, socialPatch, socialPatch, tenant(c)]);
+  return c.json({ ok: true });
+});
+
+app.put("/api/company/logo", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
+  let bytes: Uint8Array;
+  try { bytes = await boundedBody(c.req.raw, MAX_LOGO_BYTES); }
+  catch (error) { return c.json({ error: error instanceof BodyTooLarge ? "La imagen supera el máximo de 512 KB" : "No se pudo leer la imagen" }, error instanceof BodyTooLarge ? 413 : 400); }
+  const mime = c.req.header("content-type")?.toLowerCase() ?? "";
+  if (!validLogo(bytes, mime)) return c.json({ error: "Imagen inválida. Use PNG o JPEG de hasta 512 KB y 4096 × 4096 píxeles." }, 400);
+  await c.env.DB.batch([c.env.DB.prepare(`INSERT INTO company_logos (company_id, bytes, content_type, revision) VALUES (?, ?, ?, ?)
+    ON CONFLICT(company_id) DO UPDATE SET bytes = excluded.bytes, content_type = excluded.content_type, revision = excluded.revision`)
+    .bind(tenant(c), bytes, mime, crypto.randomUUID())]);
+  return c.json({ ok: true });
+});
+
+app.delete("/api/company/logo", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
+  await run("DELETE FROM company_logos WHERE company_id = ?", [tenant(c)]);
+  return c.json({ ok: true });
+});
+
+type StoredLogo = { bytes: number[] | Uint8Array; content_type: string };
+function logoResponse(logo: StoredLogo | undefined) {
+  if (!logo) return new Response(null, { status: 404, headers: { "Cache-Control": "no-store" } });
+  return new Response(new Uint8Array(logo.bytes), { headers: { "Content-Type": logo.content_type,
+    "Content-Length": String(logo.bytes.length), "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'none'; sandbox" } });
+}
+app.get("/api/company/logo", async (c) => logoResponse(await get<StoredLogo>(
+  "SELECT bytes, content_type FROM company_logos WHERE company_id = ?", [tenant(c)])));
+app.get("/api/public/:slug/logo", async (c) => logoResponse(await get<StoredLogo>(
+  `SELECT l.bytes, l.content_type FROM company_logos l JOIN companies co ON co.id = l.company_id
+   WHERE co.slug = ? AND co.status = 'active'`, [c.req.param("slug")])));
+
+app.get("/api/company/cover", async (c) => logoResponse(await get<StoredLogo>(
+  "SELECT bytes, content_type FROM company_booking_appearance WHERE company_id = ? AND bytes IS NOT NULL", [tenant(c)])));
+app.get("/api/public/:slug/cover", async (c) => logoResponse(await get<StoredLogo>(
+  `SELECT a.bytes, a.content_type FROM company_booking_appearance a JOIN companies co ON co.id = a.company_id
+   WHERE co.slug = ? AND co.status = 'active' AND a.bytes IS NOT NULL`, [c.req.param("slug")])));
+
 app.get("/api/company/booking", async (c) => {
   const company = await get<{ slug: string | null; business_hours: string }>(
     "SELECT slug, business_hours FROM companies WHERE id = ?", [tenant(c)]);
@@ -1729,7 +1890,9 @@ const publicOverview = createRoute({
     200: {
       description: "What a customer sees before booking",
       content: { "application/json": { schema: z.object({
-        company: z.object({ name: z.string(), slug: z.string(), business_hours: BusinessHoursSchema }),
+        company: z.object({ name: z.string(), slug: z.string(), business_hours: BusinessHoursSchema,
+          description: z.string(), address: z.string(), phone: z.string(), public_email: z.string(), website: z.string(), social_links: socialLinksInput, logo_url: z.string().nullable(),
+          appearance: appearanceInput, cover_url: z.string().nullable() }),
         services: z.array(z.object({ id: z.number().int(), name: z.string(), duration: z.number().int(), price: z.number() })),
         staff: z.array(z.object({ id: z.number().int(), name: z.string(), title: z.string(), color: z.string(), service_ids: z.array(z.number().int()), effective_hours: BusinessHoursSchema })),
         google_sign_in: z.boolean(),
@@ -1755,6 +1918,7 @@ app.openapi(publicOverview, async (c) => {
     company: {
       name: company.name,
       slug: company.slug,
+      ...publicProfile(company),
       business_hours: Object.fromEntries(Object.entries(hours).map(([day, windows]) =>
         [day, windows.map((window) => [minutesToTime(window.start), minutesToTime(window.end)])])),
     },

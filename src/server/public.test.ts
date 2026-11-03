@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import { signCustomerToken, signToken, verifyCustomerState } from "./auth.ts";
 
 const require = createRequire(import.meta.url);
@@ -11,10 +11,13 @@ const secret = "test-secret-for-JWT-at-least-32-characters";
 let bundle: string;
 let scenario = 0;
 before(async () => {
+  // Keep fixed booking fixtures in the future regardless of the machine's date.
+  mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-01T12:00:00Z") });
   const result = await build({ entryPoints: [new URL("./index.ts", import.meta.url).pathname],
     bundle: true, platform: "node", format: "esm", write: false });
   bundle = `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`;
 });
+after(() => mock.timers.reset());
 
 type Request = (method: string, path: string, options?: {
   body?: unknown; headers?: Record<string, string>; env?: Record<string, string>;
@@ -135,7 +138,8 @@ test("public overview answers only for active companies and only with their data
   const { db, request } = await twoCompanies(t);
   assert.equal((await request("GET", "/api/public/unknown/overview")).status, 404);
   const overview = (await request("GET", "/api/public/acme/overview")).body;
-  assert.deepEqual(overview.company, { name: "Acme", slug: "acme", business_hours:
+  assert.deepEqual(overview.company, { name: "Acme", slug: "acme", description: "", address: "", phone: "", public_email: "", website: "", social_links: {}, logo_url: null,
+    appearance: { background: "#ffffff", text: "#18181b", button: "#6d28d9", welcome: "" }, cover_url: null, business_hours:
     { mon: [["09:00", "18:00"]], tue: [["09:00", "18:00"]], wed: [["09:00", "18:00"]], thu: [["09:00", "18:00"]],
       fri: [["09:00", "18:00"]], sat: [["09:00", "18:00"]], sun: [] } });
   assert.deepEqual(overview.services, [{ id: 1, name: "Acme haircut", duration: 60, price: 40 }],

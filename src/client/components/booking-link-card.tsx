@@ -8,8 +8,7 @@ import { ApiError, api } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link, Copy, Check } from "lucide-preact";
-import { WeeklyHoursEditor, hoursError } from "./weekly-hours-editor";
-import type { WeeklyHours as Hours } from "../types";
+import { useApp } from "../context";
 
 
 function slugify(name: string): string {
@@ -19,9 +18,9 @@ function slugify(name: string): string {
 }
 
 export function BookingLinkCard() {
+  const { navigate } = useApp();
   const [slug, setSlug] = useState<string | null>(null);
   const [value, setValue] = useState("");
-  const [hours, setHours] = useState<Hours | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -30,12 +29,11 @@ export function BookingLinkCard() {
   // Fill the suggestion on first visit from the signed-in company's name.
   useEffect(() => {
     Promise.all([
-      api<{ slug: string | null; business_hours: Hours }>("GET", "/api/company/booking"),
+      api<{ slug: string | null }>("GET", "/api/company/booking"),
       api<{ company_name: string | null }>("GET", "/api/auth/session"),
     ]).then(([settings, session]) => {
       setSlug(settings.slug);
       setValue(settings.slug || slugify(session.company_name || "mi-salon"));
-      setHours(settings.business_hours);
     }).catch((cause) => setNotice((cause as Error).message || "No se pudo cargar el enlace."))
       .finally(() => setLoading(false));
   }, []);
@@ -138,22 +136,8 @@ export function BookingLinkCard() {
             <p className="mt-1 text-xs text-muted-foreground">Los enlaces viejos dejan de funcionar al cambiarlo.</p>
           </details>
         )}
-        {hours && <details className="text-sm">
-          <summary className="cursor-pointer text-muted-foreground">Horarios semanales (UTC)</summary>
-          <form className="mt-3 space-y-2" onSubmit={async (event) => {
-            event.preventDefault();
-            if (saving) return;
-            const invalid = hoursError(hours);
-            if (invalid) { setNotice(invalid); return; }
-            setSaving(true); setNotice("");
-            try { await api("PUT", "/api/company/business-hours", hours); setNotice("Horarios guardados."); }
-            catch (cause) { setNotice((cause as Error).message || "No se pudieron guardar los horarios."); }
-            finally { setSaving(false); }
-          }}>
-            <WeeklyHoursEditor hours={hours} onChange={setHours} disabled={saving} />
-            <Button type="submit" size="sm" disabled={saving}>{saving ? "Guardando..." : "Guardar horarios"}</Button>
-          </form>
-        </details>}
+        <Button variant="outline" size="sm" onClick={() => navigate("/company/appearance")}>Personalizar página de reservas</Button>
+        <Button variant="outline" size="sm" onClick={() => navigate("/company")}>Editar perfil y horarios de la empresa</Button>
         {notice && <p className="text-sm text-amber-600" role="alert">{notice}</p>}
       </CardContent>
     </Card>

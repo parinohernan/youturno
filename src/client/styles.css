@@ -86,3 +86,18 @@
     font-family: "Inter", system-ui, -apple-system, sans-serif;
   }
 }
+
+/* Accent labels remain readable even when a button color only meets UI contrast. */
+.booking-appearance .text-primary { color: var(--foreground); }
+.booking-appearance .bg-primary:hover { background-color: var(--primary); }
+.booking-appearance[data-booking-preview] :disabled { opacity: 1; }
+/* Break intrinsic text widths inside the booking surface, not at the viewport. */
+.booking-page-content { padding: 1rem; overflow-wrap: anywhere; }
+.booking-appearance-editor { overflow-wrap: anywhere; }
+.booking-appearance-editor > form button,
+.booking-appearance-editor > section > .flex button {
+  max-width: 100%; height: auto; min-height: 2.75rem; white-space: normal;
+}
+@container booking (min-width: 640px) {
+  .booking-page-content { padding: 2rem; }
+}

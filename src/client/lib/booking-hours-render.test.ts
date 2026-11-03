@@ -43,11 +43,18 @@ test("public schedule card re-renders with current service and professional sele
     if (Array.isArray(node)) return node.map(text).join(" ");
     return text(node.props?.children);
   }
+  function scheduleCard(node: any): any {
+    if (!node || typeof node !== "object") return null;
+    if (Array.isArray(node)) return node.map(scheduleCard).find(Boolean);
+    if (node.type?.displayName === "Card" && text(node).includes("Horarios de atención")) return node;
+    return scheduleCard(node.props?.children);
+  }
   const render = (serviceId: number | null, staffId: number | null) => {
     globals.__bookingRender = { index: 0, values: { 0: "ready", 1: overview, 2: serviceId, 3: staffId, 12: false } };
     const tree = BookPublic({ slug: "salon" });
-    const cards = tree.props.children;
-    return text(cards[cards.length - 1]);
+    const card = scheduleCard(tree);
+    assert.ok(card, "find the schedule card independently of presentation wrappers");
+    return text(card);
   };
   try {
     assert.match(render(null, null), /09:00 a 12:00 · 15:00 a 18:00/);

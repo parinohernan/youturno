@@ -18,10 +18,13 @@ import { cn } from "@/lib/utils";
 import { dayIntervals } from "./weekly-hours-editor";
 import { compatibleSelection, chooseService, chooseStaff } from "../lib/booking-selection";
 import { bookingHours, type ScheduledStaff } from "../lib/booking-hours";
+import { LegalLinks } from "./legal-pages";
+import { CompanyPublicDetails } from "./company-public-details";
+import { BookingPageFrame } from "./booking-page-frame";
 
-interface PublicOverview {
+export interface PublicOverview {
   google_sign_in: boolean;
-  company: { name: string; slug: string; business_hours: import("../types").WeeklyHours };
+  company: import("../types").CompanyProfile & { slug: string };
   services: { id: number; name: string; duration: number; price: number }[];
   staff: (ScheduledStaff & { name: string; title: string; color: string })[];
 }
@@ -63,25 +66,27 @@ function draftKey(slug: string): string {
   return `yt-public-book-${slug}`;
 }
 
-export function BookPublic({ slug }: { slug: string }) {
-  const [phase, setPhase] = useState<OverviewPhase>("loading");
-  const [overview, setOverview] = useState<PublicOverview | null>(null);
-  const [serviceId, setServiceId] = useState<number | null>(null);
+export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOverview }) {
+  const [phase, setPhase] = useState<OverviewPhase>(preview ? "ready" : "loading");
+  const [loadedOverview, setOverview] = useState<PublicOverview | null>(null);
+  const overview = preview ?? loadedOverview;
+  const [serviceId, setServiceId] = useState<number | null>(preview?.services[0]?.id ?? null);
   const [staffId, setStaffId] = useState<number | null>(null); // null = "Cualquiera"
-  const [date, setDate] = useState<string | null>(null);
-  const [time, setTime] = useState<string | null>(null);
-  const [slots, setSlots] = useState<string[]>([]);
+  const [date, setDate] = useState<string | null>(preview ? today() : null);
+  const [time, setTime] = useState<string | null>(preview ? "10:00" : null);
+  const [slots, setSlots] = useState<string[]>(preview ? ["10:00", "10:30", "11:00"] : []);
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [customer, setCustomer] = useState<CustomerSession | null>(null);
-  const [sessionChecked, setSessionChecked] = useState(false);
+  const [sessionChecked, setSessionChecked] = useState(!!preview);
   const [booked, setBooked] = useState<BookedAppointment | null>(null);
   const [notice, setNotice] = useState("");
-  const [authFailed] = useState(() => new URLSearchParams(window.location.search).get("auth") === "failed");
+  const [authFailed] = useState(() => !preview && new URLSearchParams(window.location.search).get("auth") === "failed");
   const submitting = useRef(false);
   const [booking, setBooking] = useState(false);
   const [slotsVersion, setSlotsVersion] = useState(0);
 
   useEffect(() => {
+    if (preview) return;
     const refresh = () => {
       setSlotsVersion((version) => version + 1);
       api<PublicOverview>("GET", `/api/public/${slug}/overview`).then(setOverview).catch(() => {});
@@ -115,6 +120,7 @@ export function BookPublic({ slug }: { slug: string }) {
   // ── Boot: overview + customer session + resumed draft ──
 
   useEffect(() => {
+    if (preview) return;
     document.title = "Reservar turno";
     api<PublicOverview>("GET", `/api/public/${slug}/overview`)
       .then(setOverview)
@@ -144,6 +150,7 @@ export function BookPublic({ slug }: { slug: string }) {
   // ── Slots follow the chosen service + staff + date ──
 
   useEffect(() => {
+    if (preview) return;
     let current = true;
     setSlots([]);
     if (!serviceId || !date || !service || !compatible) { setSlotsLoading(false); return; }
@@ -161,11 +168,13 @@ export function BookPublic({ slug }: { slug: string }) {
   }, [slug, serviceId, staffId, date, slotsVersion, overview, compatible]);
 
   const preserveDraft = () => {
+    if (preview) return;
     try { sessionStorage.setItem(draftKey(slug), JSON.stringify({ serviceId, staffId, date, time })); }
     catch { setNotice("No se pudo guardar la selección. Después de ingresar, volvé a elegir el horario."); }
   };
 
   const book = async (slot: string) => {
+    if (preview) return;
     if (!serviceId || !compatible || !date || !customer || submitting.current || slotsLoading || !slots.includes(slot)) return;
     submitting.current = true;
     setBooking(true);
@@ -218,6 +227,7 @@ export function BookPublic({ slug }: { slug: string }) {
 
   if (booked) {
     return (
+      <BookingPageFrame appearance={overview.company.appearance}>
       <div className="mx-auto max-w-md p-4 sm:p-8">
         <Card>
           <CardContent className="flex flex-col items-center gap-3 p-8 text-center">
@@ -232,7 +242,9 @@ export function BookPublic({ slug }: { slug: string }) {
             <p className="text-xs text-muted-foreground">Guardá este código para cualquier cambio.</p>
           </CardContent>
         </Card>
+        <div className="mt-4"><LegalLinks /></div>
       </div>
+      </BookingPageFrame>
     );
   }
 
@@ -245,27 +257,33 @@ export function BookPublic({ slug }: { slug: string }) {
   });
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 bg-background p-4 sm:p-8">
+    <BookingPageFrame appearance={overview.company.appearance} preview={!!preview}>
+    <div className="booking-page-content mx-auto min-w-0 max-w-2xl space-y-6 bg-background">
       <header className="space-y-1">
+        {overview.company.cover_url && <img src={overview.company.cover_url} alt="Portada de la empresa"
+          className="mb-4 aspect-[3/1] w-full rounded-lg object-cover object-center" />}
         <h1 className="text-2xl font-bold tracking-tight">{overview.company.name}</h1>
+        <CompanyPublicDetails company={overview.company} preview={!!preview} />
+        {overview.company.appearance?.welcome && <p className="whitespace-pre-wrap break-words py-2">{overview.company.appearance.welcome}</p>}
         <p className="text-sm text-muted-foreground">Reservá tu turno en tres pasos. Horarios en UTC.</p>
+        <LegalLinks />
       </header>
 
       {notice && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm" role="alert">{notice}</div>
+        <div className="rounded-md border p-3 text-sm" role="alert">{notice}</div>
       )}
       {authFailed && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm" role="alert">
+        <div className="rounded-md border p-3 text-sm" role="alert">
           No pudimos verificar tu cuenta de Google. Podés intentarlo de nuevo.
         </div>
       )}
 
-      <fieldset disabled={booking} className="space-y-6">
+      <fieldset disabled={booking || !!preview} className="min-w-0 w-full space-y-6">
       {/* Step 1 — service */}
       <section className="space-y-2">
         <h2 className="font-semibold">1. Elegí un servicio o un profesional</h2>
-        <Button variant="outline" onClick={() => selectService(null)}>Ver todos los profesionales / Limpiar servicio</Button>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Button className="h-auto min-h-11 max-w-full whitespace-normal" variant="outline" onClick={() => selectService(null)}>Ver todos los profesionales / Limpiar servicio</Button>
+        <div className="grid min-w-0 gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
           {overview.services.filter((svc) => staffId === null || overview.staff.some((member) => member.id === staffId && member.service_ids.includes(svc.id))).map((svc) => (
             <Card
               key={svc.id}
@@ -274,15 +292,15 @@ export function BookPublic({ slug }: { slug: string }) {
                 event.preventDefault(); selectService(svc.id);
               } }}
               onClick={() => { if (!booking) selectService(svc.id); }}
-              className={cn("cursor-pointer transition-shadow hover:shadow-md",
+              className={cn("min-w-0 cursor-pointer transition-shadow hover:shadow-md",
                 serviceId === svc.id && "border-primary ring-2 ring-ring/40")}
             >
-              <CardContent className="flex items-center justify-between gap-3 p-4">
-                <div className="min-w-0">
-                  <div className="truncate font-medium">{svc.name}</div>
+              <CardContent className="flex h-full min-w-0 flex-col items-start gap-3 p-4">
+                <div className="min-w-0 max-w-full">
+                  <div className="font-medium">{svc.name}</div>
                   <div className="text-xs text-muted-foreground">{svc.duration} min</div>
                 </div>
-                <div className="text-sm font-semibold">{formatMoney(svc.price)}</div>
+                <div className="mt-auto min-w-0 max-w-full text-sm font-semibold">{formatMoney(svc.price)}</div>
               </CardContent>
             </Card>
           ))}
@@ -299,18 +317,18 @@ export function BookPublic({ slug }: { slug: string }) {
                 <button
                   type="button"
                   aria-pressed={staffId === null}
-                  className={cn(btnChip, staffId === null && "border-primary bg-primary/5 text-primary")}
+                  className={cn(btnChip, staffId === null && "border-primary bg-primary text-primary-foreground")}
                   onClick={() => selectStaff(null)}
                 >Cualquiera</button>
                 {overview.staff.filter((member) => serviceId === null || member.service_ids.includes(serviceId)).map((member) => (
                   <button
                     key={member.id} type="button"
                     aria-pressed={staffId === member.id}
-                    className={cn(btnChip, staffId === member.id && "border-primary bg-primary/5 text-primary")}
+                    className={cn(btnChip, staffId === member.id && "border-primary bg-primary text-primary-foreground")}
                     onClick={() => selectStaff(member.id)}
                   >
-                    <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: member.color }} />
-                    {member.name}
+                    <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: member.color }} />
+                    <span className="min-w-0">{member.name}</span>
                   </button>
                 ))}
               </div>
@@ -324,14 +342,15 @@ export function BookPublic({ slug }: { slug: string }) {
           <h2 className="font-semibold">2. Elegí día y horario</h2>
           <div className="space-y-1.5">
             <p className="text-sm font-medium">Día</p>
-            <div className="flex gap-2 overflow-x-auto pb-1">
+            <div className="flex min-w-0 max-w-full gap-2 overflow-x-auto overscroll-x-contain p-1" role="group" aria-label="Días disponibles" tabIndex={0}>
               {days.map((day) => {
                 const d = parseDate(day);
                 const dayLabel = fmtWeekday.format(d).replace(".", "");
                 return (
                   <button
-                    key={day} type="button" onClick={() => { setDate(day); setTime(null); setNotice(""); }}
-                    className={cn(btnChip, "flex min-w-16 flex-col items-center gap-0.5 py-2",
+                    key={day} type="button" aria-pressed={date === day} aria-label={formatDate(day, "long")}
+                    onClick={() => { setDate(day); setTime(null); setNotice(""); }}
+                    className={cn(btnChip, "h-16 w-16 shrink-0 flex-col gap-0.5 p-2",
                       date === day && "border-primary bg-primary text-primary-foreground hover:bg-primary/90")}
                   >
                     <span className="text-xs capitalize opacity-80">{dayLabel}</span>
@@ -362,7 +381,7 @@ export function BookPublic({ slug }: { slug: string }) {
                 ))}
               </div>
             )}
-            {time && !customer && sessionChecked && (overview.google_sign_in ? <SignInPrompt slug={slug} time={time} preserveDraft={preserveDraft} /> :
+             {time && !customer && sessionChecked && (overview.google_sign_in ? <SignInPrompt slug={slug} time={time} preserveDraft={preserveDraft} preview={!!preview} /> :
               <p role="alert" className="text-sm">El inicio de sesión con Google todavía no está configurado. Contactá a la empresa para reservar.</p>)}
             {time && customer && <div className="space-y-2 rounded-md border p-3 text-sm">
               <h2 className="font-semibold">3. Confirmá tu turno</h2>
@@ -387,28 +406,30 @@ export function BookPublic({ slug }: { slug: string }) {
           {schedule.candidateCount === 0 && <p role="status" className="mb-2 text-sm text-muted-foreground">No hay profesionales habilitados para esta selección.</p>}
           <ul className="divide-y text-sm">
             {hoursRows.map((row) => (
-              <li key={row.label} className="flex justify-between py-1.5">
-                <span className="text-muted-foreground">{row.label}</span>
-                <span className={cn(row.window === "Cerrado" && "text-muted-foreground")}>{row.window}</span>
+              <li key={row.label} className="flex flex-wrap justify-between gap-x-3 gap-y-1 py-1.5">
+                <span className="min-w-0 text-muted-foreground">{row.label}</span>
+                <span className={cn("min-w-0", row.window === "Cerrado" && "text-muted-foreground")}>{row.window}</span>
               </li>
             ))}
           </ul>
         </CardContent>
       </Card>
     </div>
+    </BookingPageFrame>
   );
 }
 
-const btnChip = "rounded-full border border-border bg-background px-4 py-1.5 text-sm font-medium text-foreground transition-colors hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const btnChip = "inline-flex min-h-11 min-w-0 max-w-full items-center justify-center gap-2 whitespace-normal rounded-full border border-border bg-background px-4 py-1.5 text-sm font-medium text-foreground transition-colors hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-function SignInPrompt({ slug, time, preserveDraft }: { slug: string; time: string; preserveDraft: () => void }) {
+function SignInPrompt({ slug, time, preserveDraft, preview = false }: { slug: string; time: string; preserveDraft: () => void; preview?: boolean }) {
   return (
     <div className="mt-3 space-y-2 rounded-md border p-3 text-sm">
       <p>Para confirmar tu turno de las <span className="font-semibold">{time}</span>, primero iniciá sesión con tu cuenta de Google.</p>
-      <Button asChild>
+      {preview ? <Button className="h-auto min-h-11 max-w-full whitespace-normal" disabled aria-label="Continuar con Google (no disponible en vista previa)">Continuar con Google</Button> : <Button className="h-auto min-h-11 max-w-full whitespace-normal" asChild>
         <a href={`/api/auth/customer/google?slug=${encodeURIComponent(slug)}`} onClick={preserveDraft}>Continuar con Google</a>
-      </Button>
+      </Button>}
       <p className="text-xs text-muted-foreground">Al volver, revisá la selección y confirmá el turno.</p>
+      <LegalLinks />
     </div>
   );
 }
@@ -420,6 +441,7 @@ function CleanScreen({ title, body }: { title: string; body: string }) {
         <CardContent className="space-y-2 p-6 text-center">
           <h1 className="text-lg font-bold">{title}</h1>
           <p className="text-sm text-muted-foreground">{body}</p>
+          <LegalLinks />
         </CardContent>
       </Card>
     </div>

@@ -5,6 +5,7 @@ import { AppContext } from "./context";
 import { useAppState } from "./hooks/use-app";
 import { useRouter } from "./hooks/use-router";
 import { Sidebar } from "./components/sidebar";
+import { BrandLogo } from "./components/brand-logo";
 import { Dashboard } from "./components/dashboard";
 import { CalendarView } from "./components/calendar-view";
 import { AppointmentList } from "./components/appointment-list";
@@ -14,8 +15,11 @@ import { ClientDetail } from "./components/client-detail";
 import { StaffList } from "./components/staff-list";
 import { ServiceList } from "./components/service-list";
 import { ProductList } from "./components/product-list";
+import { CompanyProfilePage } from "./components/company-profile";
+import { BookingAppearanceEditor } from "./components/booking-appearance-editor";
 import { ErrorBanner } from "./components/error-banner";
 import { BookPublic } from "./components/book-public";
+import { LegalLinks, LegalPage, legalPageForPath } from "./components/legal-pages";
 
 type Session = { email: string; role: "superadmin" | "tenant"; company_id: number | null;
   company_name: string | null; company_status: string | null; csrf: string };
@@ -27,6 +31,8 @@ function publicBookingSlug(): string | null {
 }
 
 export function App() {
+  const legalPage = legalPageForPath(window.location.pathname);
+  if (legalPage) return <LegalPage kind={legalPage} />;
   const bookingSlug = publicBookingSlug();
   return bookingSlug ? <BookPublic key={bookingSlug} slug={bookingSlug} /> : <StaffApp />;
 }
@@ -54,6 +60,7 @@ function StaffApp() {
   };
   if (loading) return <div className="p-8">Cargando...</div>;
   if (!session) return <main className="mx-auto max-w-sm space-y-4 p-8">
+    <BrandLogo className="mx-auto h-36 w-36" decorative />
     <h1 className="text-2xl font-bold">Ingresar a Youturno</h1>
     <form className="space-y-4" onSubmit={async (event) => {
       event.preventDefault();
@@ -69,6 +76,7 @@ function StaffApp() {
       <label className="block">Contraseña<input className="w-full rounded border p-2" name="password" type="password" autoComplete="current-password" required /></label>
       <button className="rounded bg-violet-700 px-4 py-2 text-white" type="submit">Ingresar</button>
     </form>{error && <p role="alert">{error}</p>}
+    <LegalLinks />
   </main>;
   if (session.role === "superadmin") return <AdminPanel session={session} refresh={refresh} logout={logout} />;
   if (!session.company_id) return <main className="mx-auto max-w-sm space-y-4 p-8">
@@ -87,7 +95,7 @@ function StaffApp() {
     <p>Contactá al administrador de la plataforma.</p>
     <button className="mr-4" onClick={() => void refresh()}>Actualizar estado</button><button onClick={logout}>Salir</button>
   </main>;
-  return <TenantApp key={session.company_id} logout={logout} />;
+  return <TenantApp key={session.company_id} logout={logout} companyName={session.company_name} refreshSession={refresh} />;
 }
 
 function AdminPanel({ session, refresh, logout }: { session: Session; refresh: () => Promise<void>; logout: () => Promise<void> }) {
@@ -130,7 +138,7 @@ function AdminPanel({ session, refresh, logout }: { session: Session; refresh: (
   </main>;
 }
 
-function TenantApp({ logout }: { logout: () => Promise<void> }) {
+function TenantApp({ logout, companyName, refreshSession }: { logout: () => Promise<void>; companyName: string | null; refreshSession: () => Promise<void> }) {
   const isAgent = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
     return params.has("agent") || params.get("mode") === "agent";
@@ -164,6 +172,7 @@ function TenantApp({ logout }: { logout: () => Promise<void> }) {
       case "staff": return <StaffList />;
       case "services": return <ServiceList />;
       case "products": return <ProductList />;
+      case "company": return id === "appearance" ? <BookingAppearanceEditor /> : <CompanyProfilePage refreshSession={refreshSession} />;
       default: return <Dashboard />;
     }
   };
@@ -173,6 +182,7 @@ function TenantApp({ logout }: { logout: () => Promise<void> }) {
       <div className="flex h-dvh flex-col overflow-hidden md:flex-row">
         <Sidebar currentView={view} />
         <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-background">
+          <div className="border-b px-4 py-2 text-sm text-muted-foreground">{companyName}</div>
           {appState.loading ? (
             <div className="flex h-full items-center justify-center text-muted-foreground">Cargando...</div>
           ) : (

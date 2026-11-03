@@ -10,7 +10,10 @@ export function companyUpgrade(columns) {
   const names = new Set(columns.map((column) => column.name));
   return [
     !names.has("slug") ? "ALTER TABLE companies ADD COLUMN slug TEXT;" : "",
+    !names.has("social_links") ? "ALTER TABLE companies ADD COLUMN social_links TEXT NOT NULL DEFAULT '{}';" : "",
     !names.has("business_hours") ? `ALTER TABLE companies ADD COLUMN business_hours TEXT NOT NULL DEFAULT '${DEFAULT_HOURS}';` : "",
+    ...["description", "address", "phone", "public_email", "website"].map((field) =>
+      !names.has(field) ? `ALTER TABLE companies ADD COLUMN ${field} TEXT NOT NULL DEFAULT '';` : ""),
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug);",
   ].filter(Boolean).join("\n");
 }
@@ -42,6 +45,7 @@ function main() {
   if (!apply) {
     console.log(upgrade || "No existing columns require upgrade; additive schema/booking guards are still applied with --apply.");
     console.log("Additive schema includes empty staff_services and current-qualification admission guard; no assignments are backfilled.");
+    console.log("Additive schema also creates company_booking_appearance (settings and optional cover BLOB); no company designs are populated. Existing rows use defaults.");
     console.log("Preview only. To apply: pnpm migrate:local --apply --backup /absolute/path/to/new-backup.sql (stop the dev server first).");
     return;
   }

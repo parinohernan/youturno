@@ -1,7 +1,0 @@
-<svg viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg">
-  <!-- YouTurno mark: two intersecting circles, "yo" + "tu" -->
-  <circle cx="64" cy="90" r="52" fill="#d4af37"/>
-  <circle cx="116" cy="90" r="52" fill="#111111"/>
-  <text x="38" y="92" text-anchor="middle" dominant-baseline="central" font-family="system-ui, 'Segoe UI', sans-serif" font-size="44" font-weight="700" fill="#111111">yo</text>
-  <text x="142" y="92" text-anchor="middle" dominant-baseline="central" font-family="system-ui, 'Segoe UI', sans-serif" font-size="44" font-weight="700" fill="#ffffff">tu</text>
-</svg>

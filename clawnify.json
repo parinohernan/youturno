@@ -3,7 +3,7 @@
   "version": 1,
   "name": "Bookings",
   "description": "Appointment scheduling and business management for salons, spas, barbershops, tattoo studios, nail salons, pet groomers, personal trainers, yoga studios, med spas, physiotherapy clinics, tutoring centers, and any appointment-based business. Like Salonist, Fresha, Square Appointments, or Vagaro.",
-  "icon": "icon.svg",
+  "icon": "public/brand/youturno-logo.jpg",
   "tags": ["booking", "appointments", "salon", "scheduling"],
 
   "app": {

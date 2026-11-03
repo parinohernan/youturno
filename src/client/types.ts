@@ -1,4 +1,18 @@
-export type View = "dashboard" | "calendar" | "appointments" | "clients" | "staff" | "services" | "products";
+export type View = "dashboard" | "calendar" | "appointments" | "clients" | "staff" | "services" | "products" | "company";
+
+export interface CompanyProfile {
+  appearance?: import("../shared/booking-appearance").BookingAppearance;
+  cover_url?: string | null;
+  social_links: import("../shared/social-links").SocialLinks;
+  name: string;
+  description: string;
+  address: string;
+  phone: string;
+  public_email: string;
+  website: string;
+  logo_url: string | null;
+  business_hours: WeeklyHours;
+}
 
 export type AppointmentStatus = "booked" | "confirmed" | "in_progress" | "completed" | "cancelled" | "no_show";
 
