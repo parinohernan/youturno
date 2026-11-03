@@ -5,7 +5,7 @@ import { AppContext } from "./context";
 import { useAppState } from "./hooks/use-app";
 import { useRouter } from "./hooks/use-router";
 import { Sidebar } from "./components/sidebar";
-import { BrandLogo } from "./components/brand-logo";
+import { LoginPage } from "./components/login-page";
 import { Dashboard } from "./components/dashboard";
 import { CalendarView } from "./components/calendar-view";
 import { AppointmentList } from "./components/appointment-list";
@@ -19,7 +19,7 @@ import { CompanyProfilePage } from "./components/company-profile";
 import { BookingAppearanceEditor } from "./components/booking-appearance-editor";
 import { ErrorBanner } from "./components/error-banner";
 import { BookPublic } from "./components/book-public";
-import { LegalLinks, LegalPage, legalPageForPath } from "./components/legal-pages";
+import { LegalPage, legalPageForPath } from "./components/legal-pages";
 
 type Session = { email: string; role: "superadmin" | "tenant"; company_id: number | null;
   company_name: string | null; company_status: string | null; csrf: string };
@@ -59,10 +59,7 @@ function StaffApp() {
     setSession(null);
   };
   if (loading) return <div className="p-8">Cargando...</div>;
-  if (!session) return <main className="mx-auto max-w-sm space-y-4 p-8">
-    <BrandLogo className="mx-auto h-36 w-36" decorative />
-    <h1 className="text-2xl font-bold">Ingresar a Youturno</h1>
-    <form className="space-y-4" onSubmit={async (event) => {
+  if (!session) return <LoginPage error={error} onSubmit={async (event) => {
       event.preventDefault();
       const data = new FormData(event.currentTarget);
       try {
@@ -71,13 +68,7 @@ function StaffApp() {
         });
         setCsrfToken(response.csrf); setError(""); await refresh();
       } catch (cause) { setError((cause as Error).message); }
-    }}>
-      <label className="block">Correo electrónico<input className="w-full rounded border p-2" name="email" type="email" autoComplete="username" required /></label>
-      <label className="block">Contraseña<input className="w-full rounded border p-2" name="password" type="password" autoComplete="current-password" required /></label>
-      <button className="rounded bg-violet-700 px-4 py-2 text-white" type="submit">Ingresar</button>
-    </form>{error && <p role="alert">{error}</p>}
-    <LegalLinks />
-  </main>;
+    }} />;
   if (session.role === "superadmin") return <AdminPanel session={session} refresh={refresh} logout={logout} />;
   if (!session.company_id) return <main className="mx-auto max-w-sm space-y-4 p-8">
     <h1 className="text-xl font-bold">Configurar empresa</h1>

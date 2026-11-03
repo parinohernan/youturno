@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import { buttonForeground, defaultAppearance, isColor, type BookingAppearance } from "../../shared/booking-appearance";
+import { appearanceDecoration, buttonForeground, defaultAppearance, isColor, type BookingAppearance } from "../../shared/booking-appearance";
 
 /** The same scoped palette paints the real page and its noninteractive draft preview. */
 export function BookingPageFrame({ appearance, preview = false, children }: {
@@ -9,6 +9,7 @@ export function BookingPageFrame({ appearance, preview = false, children }: {
   for (const key of ["background", "text", "button"] as const) {
     if (!isColor(theme[key])) theme[key] = defaultAppearance[key];
   }
+  const decoration = appearanceDecoration(theme);
   return <div className="booking-appearance min-w-0 w-full bg-background text-foreground" data-booking-preview={preview || undefined}
     inert={preview || undefined} style={{
       containerType: "inline-size", containerName: "booking",
@@ -19,7 +20,9 @@ export function BookingPageFrame({ appearance, preview = false, children }: {
       "--secondary": theme.background, "--secondary-foreground": theme.text,
       "--accent": theme.background, "--accent-foreground": theme.text,
       "--primary": theme.button, "--primary-foreground": buttonForeground(theme.button),
-      "--ring": theme.text, "--border": `color-mix(in srgb, ${theme.text} 35%, ${theme.background})`,
+      "--booking-glow": decoration.glow, "--booking-line": decoration.line,
+      "--booking-shadow": decoration.shadow,
+      "--ring": theme.text, "--border": decoration.border,
       "--input": theme.text,
     }}>{children}</div>;
 }

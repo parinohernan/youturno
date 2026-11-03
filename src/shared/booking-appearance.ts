@@ -22,6 +22,20 @@ export function contrast(a: string, b: string): number {
 export function buttonForeground(button: string): string {
   return contrast(button, "#ffffff") >= contrast(button, "#000000") ? "#ffffff" : "#000000";
 }
+
+/** Decoration never changes the validated solid surfaces beneath text or controls. */
+export function appearanceDecoration(appearance: BookingAppearance) {
+  const background = isColor(appearance.background) ? appearance.background : defaultAppearance.background;
+  const text = isColor(appearance.text) ? appearance.text : defaultAppearance.text;
+  const button = isColor(appearance.button) ? appearance.button : defaultAppearance.button;
+  const alpha = (color: string, opacity: number) => `rgba(${[1, 3, 5].map((offset) => parseInt(color.slice(offset, offset + 2), 16)).join(", ")}, ${opacity})`;
+  return {
+    glow: alpha(button, 0.16),
+    line: alpha(button, 0.28),
+    border: alpha(text, 0.28),
+    shadow: alpha(text, contrast(background, "#000000") > contrast(background, "#ffffff") ? 0.08 : 0.16),
+  };
+}
 export function appearanceError(value: BookingAppearance): string | null {
   if (![value.background, value.text, value.button].every(isColor)) return "Use colores en formato #RRGGBB.";
   if (typeof value.welcome !== "string" || value.welcome.length > 500) return "El mensaje admite hasta 500 caracteres.";

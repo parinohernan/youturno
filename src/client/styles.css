@@ -91,6 +91,47 @@
 .booking-appearance .text-primary { color: var(--foreground); }
 .booking-appearance .bg-primary:hover { background-color: var(--primary); }
 .booking-appearance[data-booking-preview] :disabled { opacity: 1; }
+.booking-appearance {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--background);
+  background-image:
+    radial-gradient(ellipse at 0% 0%, var(--booking-glow), transparent 55%),
+    radial-gradient(ellipse at 100% 75%, var(--booking-glow), transparent 50%);
+}
+/* Static, bounded ornament: no extra assets, motion, hit targets or layout width. */
+.booking-appearance::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(125deg, transparent 30%, var(--booking-line) 30.1%, transparent 30.3%, transparent 65%, var(--booking-line) 65.1%, transparent 65.3%);
+  opacity: 0.3;
+}
+.booking-appearance .booking-panel,
+.booking-appearance .bg-card {
+  min-width: 0;
+  background: var(--background);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  border-radius: 1.25rem;
+  box-shadow: 0 8px 28px -12px var(--booking-shadow);
+}
+.booking-appearance .booking-company-header,
+.booking-appearance .booking-step { padding: 1.25rem; }
+.booking-appearance .booking-company-header { border-top: 3px solid var(--primary); }
+.booking-appearance .booking-company-header > img { border-radius: 0.75rem; }
+.booking-appearance .booking-step h2 { line-height: 1.5; }
+.booking-appearance [role="button"][aria-pressed="true"] {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary), 0 4px 16px -8px var(--booking-shadow);
+}
+.booking-appearance [role="button"]:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 3px;
+}
+.booking-appearance [role="alert"] { background-color: var(--background); }
 /* Break intrinsic text widths inside the booking surface, not at the viewport. */
 .booking-page-content { padding: 1rem; overflow-wrap: anywhere; }
 .booking-appearance-editor { overflow-wrap: anywhere; }
@@ -100,4 +141,99 @@
 }
 @container booking (min-width: 640px) {
   .booking-page-content { padding: 2rem; }
+  .booking-appearance .booking-company-header,
+  .booking-appearance .booking-step { padding: 1.5rem; }
 }
+
+/* Fixed platform colors: company booking themes must not affect sign-in. */
+.platform-login {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  min-height: 100vh;
+  min-height: 100svh;
+  padding: clamp(1rem, 4vw, 3rem);
+  color: #20282c;
+  background:
+    radial-gradient(ellipse at 8% 12%, #e5a52c45, transparent 48%),
+    radial-gradient(ellipse at 92% 90%, #b97e2438, transparent 48%),
+    linear-gradient(135deg, #30383b, #141b20 55%, #292c29);
+}
+.platform-login__decoration {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.platform-login__orbit {
+  position: absolute;
+  width: clamp(32rem, 75vw, 80rem);
+  aspect-ratio: 1;
+  top: -50%;
+  left: -25%;
+  border: 1px solid #f5c36b26;
+  border-radius: 50%;
+}
+.platform-login__orbit--inner {
+  inset: auto -30% -65% auto;
+  border-width: 48px;
+  border-color: #f5c36b06;
+}
+.platform-login__content { width: 100%; max-width: 27rem; margin: auto; min-width: 0; }
+.platform-login__card {
+  padding: clamp(1.25rem, 5vw, 2.5rem);
+  background: #fff;
+  border: 1px solid #fff;
+  border-top: 3px solid #efad16;
+  border-radius: 1.5rem;
+  box-shadow: 0 24px 80px #0005;
+}
+.platform-login__logo { display: block; width: 8rem; height: 8rem; margin: -0.5rem auto 0.75rem; }
+.platform-login__heading { text-align: center; }
+.platform-login__eyebrow {
+  margin-bottom: 0.5rem;
+  color: #83600d;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.platform-login__heading h1 { font-size: clamp(1.375rem, 5vw, 1.625rem); font-weight: 700; letter-spacing: -0.035em; line-height: 1.25; }
+.platform-login__heading > p:last-child { margin-top: 0.75rem; color: #586268; font-size: 0.875rem; line-height: 1.6; }
+.platform-login__form { display: grid; gap: 1.125rem; margin-top: 1.75rem; }
+.platform-login__form label { display: grid; gap: 0.5rem; font-size: 0.875rem; font-weight: 600; }
+.platform-login__form input {
+  width: 100%;
+  min-width: 0;
+  min-height: 3rem;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid #929b9f;
+  border-radius: 0.625rem;
+  background: #fcfcfb;
+  color: #20282c;
+  font-size: 1rem;
+  font-weight: 400;
+}
+.platform-login__form button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  min-height: 3rem;
+  margin-top: 0.375rem;
+  padding: 0.625rem 1rem;
+  border-radius: 0.625rem;
+  background: linear-gradient(110deg, #f8bf26, #efab0e);
+  color: #24291f;
+  font-weight: 700;
+  cursor: pointer;
+}
+.platform-login__form button:hover { background: #e9a70b; }
+.platform-login__form :is(input, button):focus-visible { outline: 3px solid #946600; outline-offset: 3px; }
+.platform-login__error { margin-top: 1rem; padding: 0.75rem; border-radius: 0.5rem; background: #fff1f0; color: #a32121; overflow-wrap: anywhere; font-size: 0.875rem; }
+.platform-login__footer { margin-top: 1.5rem; }
+.platform-login__footer nav { justify-content: center; }
+.platform-login__footer a { color: #e0e3e4; text-decoration: underline; text-underline-offset: 4px; }
+.platform-login__footer a:hover { color: #ffd478; }
+.platform-login__footer a:focus-visible { outline: 2px solid #ffd478; outline-offset: 4px; border-radius: 2px; }

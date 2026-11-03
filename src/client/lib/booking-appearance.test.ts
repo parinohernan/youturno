@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
 import { setImmediate } from "node:timers/promises";
 import { test } from "node:test";
-import { appearanceError, buttonForeground, contrast, defaultAppearance, readAppearance } from "../../shared/booking-appearance.ts";
+import { appearanceDecoration, appearanceError, buttonForeground, contrast, defaultAppearance, readAppearance } from "../../shared/booking-appearance.ts";
 
 const require = createRequire(import.meta.url);
 const { build } = createRequire(require.resolve("vite"))("esbuild");
@@ -50,6 +50,35 @@ test("appearance allowlisted colors, legacy defaults and deterministic button fo
   assert.ok(appearanceError({ ...defaultAppearance, text: "#eeeeee" }));
   assert.ok(appearanceError({ ...defaultAppearance, button: "#ffffff" }));
   assert.ok(appearanceError({ ...defaultAppearance, welcome: "x".repeat(501) }));
+});
+
+test("company decoration follows light, dark and colorful palettes without changing validated surfaces", async () => {
+  const { BookingPageFrame } = await load("booking-page-frame");
+  const palettes = [defaultAppearance,
+    { ...defaultAppearance, background: "#14252b", text: "#f5faf9", button: "#5eead4" },
+    { ...defaultAppearance, background: "#fff1f2", text: "#4c0519", button: "#be123c" },
+    { ...defaultAppearance, background: "#ffffff", text: "#767676", button: "#949494" }];
+  const glows = new Set();
+  for (const appearance of palettes) {
+    assert.equal(appearanceError(appearance), null);
+    const decoration = appearanceDecoration(appearance);
+    glows.add(decoration.glow);
+    const frame = BookingPageFrame({ appearance, children: "Content" });
+    const styles = frame.props.style;
+    for (const key of ["--background", "--card", "--muted", "--accent", "--secondary"])
+      assert.equal(styles[key], appearance.background, "decoration must not weaken near-threshold text contrast");
+    assert.equal(styles["--primary"], appearance.button);
+    assert.ok(contrast(styles["--foreground"], styles["--card"]) >= 4.5);
+    assert.ok(contrast(styles["--primary"], styles["--background"]) >= 3);
+    assert.ok(contrast(styles["--primary"], styles["--primary-foreground"]) >= 4.5);
+    assert.equal(styles["--booking-glow"], decoration.glow);
+    assert.doesNotMatch(JSON.stringify(styles), /color-mix|#e5a52c|#141b20/);
+  }
+  assert.equal(glows.size, palettes.length);
+  assert.deepEqual(appearanceDecoration({ ...defaultAppearance, button: "url(invalid)" }), appearanceDecoration(defaultAppearance));
+  const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.booking-appearance::before\s*\{[^}]*pointer-events: none/);
+  assert.match(css, /\.booking-appearance \.booking-panel,[\s\S]*?background: var\(--background\)/);
 });
 
 test("preview renders the actual public booking layout, reuses logo/legal identity and performs no requests or storage/OAuth work", async () => {

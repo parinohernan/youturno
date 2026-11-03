@@ -213,7 +213,7 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
   }, []);
 
   if (phase === "loading") {
-    return <div className="flex min-h-dvh items-center justify-center bg-background p-8 text-muted-foreground">Cargando...</div>;
+    return <BookingPageFrame><div className="booking-page-content mx-auto max-w-md"><div className="booking-panel p-8" role="status">Cargando...</div></div></BookingPageFrame>;
   }
   if (phase === "notfound") {
     return <CleanScreen title="Agenda no disponible" body="Este enlace no corresponde a una agenda activa. Verificá con la empresa y volvé a intentarlo." />;
@@ -228,7 +228,7 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
   if (booked) {
     return (
       <BookingPageFrame appearance={overview.company.appearance}>
-      <div className="mx-auto max-w-md p-4 sm:p-8">
+      <div className="booking-page-content mx-auto max-w-md">
         <Card>
           <CardContent className="flex flex-col items-center gap-3 p-8 text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-2xl">✓</div>
@@ -258,11 +258,11 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
 
   return (
     <BookingPageFrame appearance={overview.company.appearance} preview={!!preview}>
-    <div className="booking-page-content mx-auto min-w-0 max-w-2xl space-y-6 bg-background">
-      <header className="space-y-1">
+    <div className="booking-page-content mx-auto min-w-0 max-w-2xl space-y-6">
+      <header className="booking-company-header booking-panel space-y-3">
         {overview.company.cover_url && <img src={overview.company.cover_url} alt="Portada de la empresa"
           className="mb-4 aspect-[3/1] w-full rounded-lg object-cover object-center" />}
-        <h1 className="text-2xl font-bold tracking-tight">{overview.company.name}</h1>
+        <h1 className="text-center text-2xl font-bold tracking-tight">{overview.company.name}</h1>
         <CompanyPublicDetails company={overview.company} preview={!!preview} />
         {overview.company.appearance?.welcome && <p className="whitespace-pre-wrap break-words py-2">{overview.company.appearance.welcome}</p>}
         <p className="text-sm text-muted-foreground">Reservá tu turno en tres pasos. Horarios en UTC.</p>
@@ -270,17 +270,17 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
       </header>
 
       {notice && (
-        <div className="rounded-md border p-3 text-sm" role="alert">{notice}</div>
+        <div className="booking-panel rounded-md border p-3 text-sm" role="alert">{notice}</div>
       )}
       {authFailed && (
-        <div className="rounded-md border p-3 text-sm" role="alert">
+        <div className="booking-panel rounded-md border p-3 text-sm" role="alert">
           No pudimos verificar tu cuenta de Google. Podés intentarlo de nuevo.
         </div>
       )}
 
       <fieldset disabled={booking || !!preview} className="min-w-0 w-full space-y-6">
       {/* Step 1 — service */}
-      <section className="space-y-2">
+      <section className="booking-step booking-panel space-y-4">
         <h2 className="font-semibold">1. Elegí un servicio o un profesional</h2>
         <Button className="h-auto min-h-11 max-w-full whitespace-normal" variant="outline" onClick={() => selectService(null)}>Ver todos los profesionales / Limpiar servicio</Button>
         <div className="grid min-w-0 gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))" }}>
@@ -308,7 +308,7 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
       </section>
 
       {/* Professional selection is available even before choosing a service. */}
-        <section className="space-y-4">
+        <section className="booking-step booking-panel space-y-4">
 
           {overview.staff.length > 0 && (
             <div className="space-y-1.5">
@@ -436,7 +436,7 @@ function SignInPrompt({ slug, time, preserveDraft, preview = false }: { slug: st
 
 function CleanScreen({ title, body }: { title: string; body: string }) {
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-background p-8">
+    <BookingPageFrame><div className="booking-page-content mx-auto flex min-h-dvh max-w-md items-center justify-center">
       <Card className="max-w-sm">
         <CardContent className="space-y-2 p-6 text-center">
           <h1 className="text-lg font-bold">{title}</h1>
@@ -444,6 +444,6 @@ function CleanScreen({ title, body }: { title: string; body: string }) {
           <LegalLinks />
         </CardContent>
       </Card>
-    </div>
+    </div></BookingPageFrame>
   );
 }
