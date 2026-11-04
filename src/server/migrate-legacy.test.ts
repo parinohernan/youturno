@@ -8,6 +8,39 @@ const schema = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
 const migration = readFileSync(new URL("./migrate-legacy.sql", import.meta.url), "utf8");
 const types = ["clients", "staff", "services", "appointments", "appointment_services", "appointment_notes", "blocked_slots", "products"];
 
+test("scheduling migration defaults legacy staff to fixed/30 and preserves configured policy on repeat", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(schema.replace(/^  scheduling_mode .*\n/m, "").replace(/^  scheduling_interval .*\n/m, "")
+      .replace(/CREATE TRIGGER IF NOT EXISTS admit_public_booking_policy_v1[\s\S]*?\nEND;/, ""));
+    db.exec(`INSERT INTO companies (id, name, status) VALUES (1, 'Preserved', 'active');
+      INSERT INTO staff (id, name, email, working_hours) VALUES (7, 'Legacy', 'fixture@example.test', '{"mon":[["09:10","12:00"]]}');
+      INSERT INTO services (id, name) VALUES (4, 'Existing');
+      INSERT INTO tenant_ownership VALUES ('staff', 7, 1), ('services', 4, 1);
+      INSERT INTO staff_services VALUES (1, 7, 4);`);
+    const old = db.prepare("SELECT * FROM staff").get()!;
+    const counts = () => types.map((type) => db.prepare(`SELECT count(*) AS n FROM ${type}`).get()?.n);
+    const before = counts();
+    for (let pass = 0; pass < 2; pass++) {
+      const upgrade = staffUpgrade(db.prepare("PRAGMA table_info(staff)").all());
+      if (upgrade) db.exec(upgrade);
+      db.exec(schema);
+      db.exec(migration);
+      const { scheduling_mode, scheduling_interval, ...original } = db.prepare("SELECT * FROM staff").get()!;
+      assert.deepEqual(original, { ...old });
+      assert.equal(scheduling_mode, pass ? "service_duration" : "fixed");
+      assert.equal(scheduling_interval, pass ? 17 : 30);
+      assert.deepEqual(counts(), before);
+      assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+      db.exec("UPDATE staff SET scheduling_mode = 'service_duration', scheduling_interval = 17");
+    }
+    assert.equal(staffUpgrade(db.prepare("PRAGMA table_info(staff)").all()), "");
+    assert.throws(() => db.exec("UPDATE staff SET scheduling_mode = 'ai'"), /CHECK/);
+    assert.throws(() => db.exec("UPDATE staff SET scheduling_interval = 0"), /CHECK/);
+    assert.throws(() => db.exec("UPDATE staff SET scheduling_interval = 1.5"), /CHECK/);
+  } finally { db.close(); }
+});
+
 test("qualification migration is additive, repeatable and leaves legacy staff unassigned", () => {
   const db = new DatabaseSync(":memory:");
   try {
@@ -56,12 +89,12 @@ test("existing staff inherit after additive repeatable schedule migration withou
     assert.equal(db.prepare("SELECT email FROM staff WHERE id = 9").get()?.email, "staff@example.test");
     assert.equal(db.prepare("SELECT business_hours FROM companies WHERE id = 1").get()?.business_hours, '{"mon":["10:00","17:00"]}');
     assert.equal(db.prepare("PRAGMA foreign_key_check").all().length, 0);
-    db.exec(`INSERT INTO services (id, name) VALUES (1, 'Explicit service');
+    db.exec(`INSERT INTO services (id, name, duration) VALUES (1, 'Explicit service', 60);
       INSERT INTO tenant_ownership VALUES ('services', 1, 1);
       INSERT INTO staff_services VALUES (1, 9, 1);`);
     assert.throws(() => db.exec(`INSERT INTO public_booking_admission VALUES ('closed', 1, 9, 1, '2026-11-02', '10:00', '11:00')`), /public booking conflict/);
     db.exec("UPDATE staff SET working_hours = NULL WHERE id = 9");
-    db.exec(`INSERT INTO public_booking_admission VALUES ('inherit', 1, 9, 1, '2026-11-02', '10:00', '11:00')`);
+    db.exec(`INSERT INTO public_booking_admission VALUES ('inherit', 1, 9, 1, '2037-11-02', '10:00', '11:00')`);
     assert.throws(() => db.exec(`INSERT INTO public_booking_admission VALUES ('outside', 1, 9, 1, '2026-11-02', '09:00', '10:00')`), /public booking conflict/);
   } finally { db.close(); }
 });

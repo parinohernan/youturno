@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, mock, test } from "node:test";
 import { signCustomerToken, signToken, verifyCustomerState } from "./auth.ts";
+import { publicStarts, type SchedulingMode } from "./scheduling.ts";
 
 const require = createRequire(import.meta.url);
 const { build } = createRequire(require.resolve("vite"))("esbuild");
@@ -12,7 +13,7 @@ let bundle: string;
 let scenario = 0;
 before(async () => {
   // Keep fixed booking fixtures in the future regardless of the machine's date.
-  mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-01T12:00:00Z") });
+  mock.timers.enable({ apis: ["Date"], now: new Date("2037-11-01T12:00:00Z") });
   const result = await build({ entryPoints: [new URL("./index.ts", import.meta.url).pathname],
     bundle: true, platform: "node", format: "esm", write: false });
   bundle = `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`;
@@ -126,13 +127,147 @@ async function twoCompanies(t: Parameters<typeof harness>[0]) {
   return { db, request: request as Request, metrics, synchronizeBatches, beforeNextBatch };
 }
 
-// 2026-11-02 is a Monday (09:00-18:00 default hours); the day before is Sunday.
-const MONDAY = "2026-11-02";
-const SUNDAY = "2026-11-08";
+// 2037-11-02 is a Monday; far-future fixtures also satisfy SQLite's real clock.
+const MONDAY = "2037-11-02";
+const SUNDAY = "2037-11-08";
 
 /** Attach a business row the tests created directly to company 1. */
 const ownCompany1 = (db: DatabaseSync, type: string, id: number) =>
   db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES (?, ?, 1)").run(type, id);
+
+test("staff scheduling settings default, validate, preserve omissions and resist mass assignment", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  db.exec("INSERT INTO users (email, password_hash, role, company_id) VALUES ('owner@example.test', 'test', 'tenant', 1)");
+  const token = await signToken(secret, 1, 0);
+  const headers = { cookie: `__Host-youturno=${token.jwt}`, "x-csrf-token": token.csrf };
+  const read = () => db.prepare("SELECT * FROM staff WHERE id = 1").get()!;
+  assert.equal(read().scheduling_mode, "fixed");
+  assert.equal(read().scheduling_interval, 30);
+  const put = (body: unknown) => request("PUT", "/api/staff/1", { headers, body });
+  for (const body of [{ scheduling_mode: "smart" }, { scheduling_mode: null }, { scheduling_interval: 0 },
+    { scheduling_interval: -1 }, { scheduling_interval: 241 }, { scheduling_interval: 2.5 },
+    { scheduling_interval: "10" }, { scheduling_interval: null }, { company_id: 2 }, { id: 3 }]) {
+    assert.equal((await put(body)).status, 400);
+    assert.equal((await request("POST", "/api/staff", { headers, body: { name: "Invalid", ...body } })).status, 400);
+  }
+  assert.equal((await put({ scheduling_mode: "fixed", scheduling_interval: 17, working_hours: { mon: [["09:10", "13:00"]] } })).status, 200);
+  assert.equal((await put({ scheduling_mode: "service_duration" })).status, 200);
+  assert.equal((await put({ name: "Renamed" })).status, 200);
+  assert.equal(read().scheduling_mode, "service_duration");
+  assert.equal(read().scheduling_interval, 17);
+  assert.deepEqual(JSON.parse(String(read().working_hours)), { mon: [["09:10", "13:00"]] });
+  assert.deepEqual(db.prepare("SELECT service_id FROM staff_services WHERE staff_id = 1").all().map((r) => r.service_id), [1]);
+  const created = await request("POST", "/api/staff", { headers, body: { name: "Fixture", scheduling_mode: "consecutive", scheduling_interval: 10, service_ids: [1] } });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.staff.scheduling_mode, "consecutive");
+  assert.equal(created.body.staff.scheduling_interval, 10);
+  assert.equal((await request("PUT", "/api/staff/3", { headers, body: { scheduling_mode: "consecutive" } })).status, 404);
+});
+
+test("any-professional slots union each policy and assign only a professional accepting that start", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  db.exec(`UPDATE companies SET business_hours = '{"mon":[["09:10","11:00"],["16:10","18:00"]]}' WHERE id = 1;
+    UPDATE services SET duration = 30 WHERE id = 1;
+    UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1;
+    UPDATE staff SET scheduling_mode = 'service_duration' WHERE id = 2;`);
+  const slots = async (suffix = "") => (await request("GET", `/api/public/acme/slots?date=${MONDAY}&service_id=1${suffix}`)).body.slots;
+  assert.deepEqual(await slots("&staff_id=1"), ["09:10", "16:10"]);
+  assert.deepEqual(await slots(), ["09:10", "09:40", "10:10", "16:10", "16:40", "17:10"]);
+  const cookie = await bookingCookie();
+  const book = (start_time: string, staff_id?: number) => request("POST", "/api/public/acme/book", {
+    headers: { cookie }, body: { service_id: 1, date: MONDAY, start_time, ...(staff_id ? { staff_id } : {}) } });
+  assert.equal((await book("09:40", 1)).status, 409);
+  assert.equal((await book("09:27")).status, 409);
+  assert.equal((await book("25:00")).status, 400);
+  const booked = await book("09:40");
+  assert.equal(booked.status, 201);
+  assert.equal(db.prepare("SELECT staff_id FROM appointments WHERE id = ?").get(booked.body.appointment.id)?.staff_id, 2);
+  assert.deepEqual(await slots("&staff_id=1"), ["09:10", "16:10"]);
+});
+
+for (const change of ["mode", "cadence", "earliest", "duration"]) {
+  test(`atomic admission rejects stale public policy: ${change}`, async (t) => {
+    const { db, request, metrics, beforeNextBatch } = await twoCompanies(t);
+    let start_time = "09:30";
+    if (change === "earliest") {
+      db.exec(`UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1;
+        INSERT INTO blocked_slots (id, staff_id, blocked_date, start_time, end_time) VALUES (1, 1, '${MONDAY}', '09:00', '10:17');`);
+      ownCompany1(db, "blocked_slots", 1);
+      start_time = "10:17";
+    }
+    beforeNextBatch(() => {
+      if (change === "mode") db.exec("UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1");
+      if (change === "cadence") db.exec("UPDATE staff SET scheduling_interval = 60 WHERE id = 1");
+      if (change === "earliest") db.exec("DELETE FROM blocked_slots WHERE id = 1");
+      if (change === "duration") db.exec("UPDATE services SET duration = 45 WHERE id = 1");
+    });
+    const result = await request("POST", "/api/public/acme/book", { headers: { cookie: await bookingCookie() },
+      body: { service_id: 1, staff_id: 1, date: MONDAY, start_time } });
+    assert.equal(result.status, 409);
+    assert.equal(metrics.admissionConflicts, 1);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM appointments").get()?.n, 0);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM clients").get()?.n, 0);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM public_booking_admission").get()?.n, 0);
+  });
+}
+
+test("consecutive contention admits only one customer and advances to the exact busy end", async (t) => {
+  const { db, request, synchronizeBatches, metrics } = await twoCompanies(t);
+  db.exec("UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1; UPDATE services SET duration = 45 WHERE id = 1");
+  synchronizeBatches(2);
+  const results = await Promise.all(["one", "two"].map(async (name) => request("POST", "/api/public/acme/book", {
+    headers: { cookie: await bookingCookie(`${name}@example.test`) }, body: { service_id: 1, staff_id: 1, date: MONDAY, start_time: "09:00" } })));
+  assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
+  assert.equal(metrics.admissionConflicts, 1);
+  assert.deepEqual((await request("GET", `/api/public/acme/slots?date=${MONDAY}&service_id=1&staff_id=1`)).body.slots, ["09:45"]);
+});
+
+test("atomic SQL and shared pure generator agree on every minute across policies, durations and split hours", async (t) => {
+  const { db } = await twoCompanies(t);
+  db.exec(`UPDATE companies SET business_hours = '{"mon":[["09:00","13:00"],["16:00","19:00"]]}' WHERE id = 1;
+    UPDATE staff SET working_hours = '{"mon":[["09:10","12:30"],["16:10","18:00"]]}' WHERE id = 1;
+    INSERT INTO blocked_slots (id, staff_id, blocked_date, start_time, end_time) VALUES (1, 1, '${MONDAY}', '09:23', '09:37');`);
+  ownCompany1(db, "blocked_slots", 1);
+  const windows = [{ start: 550, end: 750 }, { start: 970, end: 1080 }];
+  const busy = [{ kind: "blocked" as const, start_time: "09:23", end_time: "09:37", label: "Fixture" }];
+  const insert = db.prepare("INSERT INTO public_booking_admission VALUES ('probe', 1, 1, 1, ?, ?, ?)");
+  const time = (i: number) => `${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}`;
+  for (const mode of ["consecutive", "fixed", "service_duration"] as SchedulingMode[]) {
+    for (const duration of [10, 30, 45, 60]) {
+      for (const cadence of (mode === "fixed" ? [5, 10, 15, 30] : [30])) {
+        db.prepare("UPDATE staff SET scheduling_mode = ?, scheduling_interval = ? WHERE id = 1").run(mode, cadence);
+        db.prepare("UPDATE services SET duration = ? WHERE id = 1").run(duration);
+        const expected = new Set(publicStarts(windows, duration, busy, { scheduling_mode: mode, scheduling_interval: cadence }));
+        for (let minute = 540; minute <= 1140; minute++) {
+          let accepted = false;
+          try { insert.run(MONDAY, time(minute), time(minute + duration)); accepted = true; }
+          catch (error) { assert.match(String(error), /public booking conflict/); }
+          db.exec("DELETE FROM public_booking_admission");
+          assert.equal(accepted, expected.has(time(minute)), `${mode}/${cadence}/${duration} at ${time(minute)}`);
+        }
+      }
+    }
+  }
+});
+
+test("atomic consecutive admission uses the database clock ceiling and rejects past starts", async (t) => {
+  const { db } = await twoCompanies(t);
+  const clock = db.prepare("SELECT date('now') AS day, strftime('%H:%M', 'now') AS time").get()!;
+  if (String(clock.time) >= "23:57") { t.skip("Insufficient room before midnight for full-service clock fixture"); return; }
+  const day = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][new Date(`${clock.day}T00:00:00Z`).getUTCDay()];
+  db.prepare("UPDATE companies SET business_hours = ? WHERE id = 1").run(JSON.stringify({ [day]: [["00:00", "23:59"]] }));
+  db.exec("UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1; UPDATE services SET duration = 1 WHERE id = 1");
+  assert.throws(() => db.exec(`INSERT INTO public_booking_admission
+    SELECT 'past', 1, 1, 1, date('now', '-1 day'), '12:00', '12:01'`), /public booking conflict/);
+  assert.throws(() => db.exec(`INSERT INTO public_booking_admission
+    SELECT 'later', 1, 1, 1, date('now'), strftime('%H:%M', 'now', '+2 minutes'), strftime('%H:%M', 'now', '+3 minutes')`), /public booking conflict/);
+  // 'now' is stable within a SQLite statement, including all trigger steps.
+  db.exec(`INSERT INTO public_booking_admission
+    SELECT 'ceiling', 1, 1, 1, date('now'),
+      strftime('%H:%M', 'now', CASE WHEN CAST(strftime('%f', 'now') AS REAL) > 0 THEN '+1 minute' ELSE '+0 minutes' END),
+      strftime('%H:%M', 'now', CASE WHEN CAST(strftime('%f', 'now') AS REAL) > 0 THEN '+2 minutes' ELSE '+1 minute' END)`);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM public_booking_admission").get()?.n, 1);
+});
 
 test("public overview answers only for active companies and only with their data", async (t) => {
   const { db, request } = await twoCompanies(t);
@@ -257,7 +392,7 @@ test("public booking creates a confirmed appointment, one client per customer an
 
   const full = await book({ service_id: 1, date: MONDAY, start_time: "10:00" });
   assert.equal(full.status, 409);
-  assert.equal(full.body.error, "Slot is no longer available");
+  assert.equal(full.body.error, "El horario ya no está disponible. Actualiza los horarios y elige otro.");
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM appointments").get()?.count, 2, "no partial writes on conflict");
 
   const late = await book({ service_id: 1, date: MONDAY, start_time: "17:30" });
@@ -504,7 +639,8 @@ test("staff schedule edits validate intervals, preserve updates and enforce tena
   const body = { working_hours: { mon: [["09:00", "13:00"], ["16:00", "20:00"]], tue: null } };
   assert.equal((await request("PUT", "/api/staff/3", { headers, body })).status, 404);
   assert.equal(db.prepare("SELECT working_hours FROM staff WHERE id = 3").get()?.working_hours, null);
-  assert.equal((await request("PUT", "/api/staff/1", { headers, body: { ...body, company_id: 2 } })).status, 200);
+  assert.equal((await request("PUT", "/api/staff/1", { headers, body: { ...body, company_id: 2 } })).status, 400);
+  assert.equal((await request("PUT", "/api/staff/1", { headers, body })).status, 200);
   assert.equal(db.prepare("SELECT company_id FROM tenant_ownership WHERE resource_type = 'staff' AND resource_id = 1").get()?.company_id, 1);
   assert.deepEqual((await request("GET", "/api/staff", { headers })).body.staff.find((s: any) => s.id === 1).working_hours,
     { mon: [["09:00", "13:00"], ["16:00", "20:00"]], tue: [] });
@@ -520,7 +656,8 @@ test("staff schedule edits validate intervals, preserve updates and enforce tena
   assert.notEqual(db.prepare("SELECT working_hours FROM staff WHERE id = 1").get()?.working_hours, null, "unrelated updates preserve overrides");
   assert.equal((await request("PUT", "/api/staff/1", { headers, body: { working_hours: null } })).status, 200);
   assert.equal(db.prepare("SELECT working_hours FROM staff WHERE id = 1").get()?.working_hours, null);
-  const created = await request("POST", "/api/staff", { headers, body: { name: "New", ...body, company_id: 2 } });
+  assert.equal((await request("POST", "/api/staff", { headers, body: { name: "New", ...body, company_id: 2 } })).status, 400);
+  const created = await request("POST", "/api/staff", { headers, body: { name: "New", ...body } });
   assert.equal(created.status, 201);
   assert.deepEqual(created.body.staff.working_hours.tue, []);
   assert.equal(db.prepare("SELECT company_id FROM tenant_ownership WHERE resource_type = 'staff' AND resource_id = ?").get(created.body.staff.id)?.company_id, 1);

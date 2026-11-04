@@ -80,6 +80,8 @@ export interface Staff {
   color: string;
   active: number;
   working_hours?: WeeklyHours | null;
+  scheduling_mode?: "consecutive" | "fixed" | "service_duration";
+  scheduling_interval?: number;
   appointment_count?: number;
   completed_appointment_count?: number;
   completed_service_value?: number;

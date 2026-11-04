@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS staff (
   color TEXT NOT NULL DEFAULT '#7c3aed',
   active INTEGER NOT NULL DEFAULT 1,
   working_hours TEXT DEFAULT NULL,
+  scheduling_mode TEXT NOT NULL DEFAULT 'fixed' CHECK (scheduling_mode IN ('consecutive', 'fixed', 'service_duration')),
+  scheduling_interval INTEGER NOT NULL DEFAULT 30 CHECK (typeof(scheduling_interval) = 'integer' AND scheduling_interval BETWEEN 1 AND 240),
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -295,6 +297,74 @@ BEGIN
       THEN json_array(json(intervals)) ELSE intervals END) AS interval
     WHERE valid AND json_extract(interval.value, '$[0]') <= NEW.start_time
       AND json_extract(interval.value, '$[1]') >= NEW.end_time
+  );
+END;
+-- Re-evaluate the public start policy inside the admission transaction. Candidate
+-- boundaries suffice for earliest-fit: opening, busy ends and the current minute
+-- ceiling. Busy gaps do not become separate working intervals. No minute grid
+-- is imposed on consecutive mode; fixed mode retains midnight alignment.
+CREATE TRIGGER IF NOT EXISTS admit_public_booking_policy_v1 BEFORE INSERT ON public_booking_admission
+BEGIN
+  SELECT RAISE(ABORT, 'public booking conflict') WHERE NOT EXISTS (
+    WITH source AS (
+      SELECT s.scheduling_mode AS mode, s.scheduling_interval AS cadence, sv.duration,
+        CAST(substr(NEW.start_time, 1, 2) AS INTEGER) * 60 + CAST(substr(NEW.start_time, 4, 2) AS INTEGER) AS requested,
+        CASE WHEN json_valid(c.business_hours) THEN c.business_hours ELSE '{}' END AS company_hours,
+        CASE WHEN json_valid(s.working_hours) THEN s.working_hours ELSE '{}' END AS personal_hours,
+        s.working_hours IS NULL AS inherit,
+        '$.' || CASE strftime('%w', NEW.scheduled_date)
+          WHEN '0' THEN 'sun' WHEN '1' THEN 'mon' WHEN '2' THEN 'tue'
+          WHEN '3' THEN 'wed' WHEN '4' THEN 'thu' WHEN '5' THEN 'fri' WHEN '6' THEN 'sat' END AS path
+      FROM staff s, companies c, services sv
+      WHERE s.id = NEW.staff_id AND c.id = NEW.company_id AND sv.id = NEW.service_id
+    ), days AS (
+      SELECT *, json_extract(company_hours, path) AS company_day,
+        CASE WHEN inherit OR json_type(personal_hours, path) IS NULL
+          THEN json_extract(company_hours, path) ELSE json_extract(personal_hours, path) END AS personal_day
+      FROM source
+    ), pairs AS (
+      SELECT max(json_extract(c.value, '$[0]'), json_extract(p.value, '$[0]')) AS opening,
+        min(json_extract(c.value, '$[1]'), json_extract(p.value, '$[1]')) AS closing,
+        mode, cadence, duration, requested
+      FROM days,
+        json_each(CASE WHEN json_type(company_day, '$[0]') = 'text' THEN json_array(json(company_day)) ELSE company_day END) c,
+        json_each(CASE WHEN json_type(personal_day, '$[0]') = 'text' THEN json_array(json(personal_day)) ELSE personal_day END) p
+    ), windows AS (
+      SELECT CAST(substr(opening, 1, 2) AS INTEGER) * 60 + CAST(substr(opening, 4, 2) AS INTEGER) AS lo,
+        CAST(substr(closing, 1, 2) AS INTEGER) * 60 + CAST(substr(closing, 4, 2) AS INTEGER) AS hi,
+        mode, cadence, duration, requested FROM pairs WHERE opening < closing
+    ), busy AS (
+      SELECT a.start_time AS start, a.end_time AS finish FROM appointments a
+      JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+      WHERE o.company_id = NEW.company_id AND a.staff_id = NEW.staff_id
+        AND a.scheduled_date = NEW.scheduled_date AND a.status != 'cancelled'
+      UNION ALL
+      SELECT b.start_time, b.end_time FROM blocked_slots b
+      JOIN tenant_ownership o ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id
+      WHERE o.company_id = NEW.company_id AND b.staff_id = NEW.staff_id AND b.blocked_date = NEW.scheduled_date
+    ), occupied AS (
+      SELECT CAST(substr(start, 1, 2) AS INTEGER) * 60 + CAST(substr(start, 4, 2) AS INTEGER) AS lo,
+        CAST(substr(finish, 1, 2) AS INTEGER) * 60 + CAST(substr(finish, 4, 2) AS INTEGER) AS hi FROM busy
+    ), boundaries AS (
+      SELECT lo AS start FROM windows UNION SELECT hi FROM occupied UNION
+      SELECT CAST(strftime('%H', 'now') AS INTEGER) * 60 + CAST(strftime('%M', 'now') AS INTEGER)
+        + CASE WHEN CAST(strftime('%f', 'now') AS REAL) > 0 THEN 1 ELSE 0 END
+      WHERE NEW.scheduled_date = date('now')
+    )
+    SELECT 1 FROM windows w
+    WHERE duration > 0 AND typeof(duration) = 'integer'
+      AND NEW.scheduled_date = date(NEW.scheduled_date, '+0 days')
+      AND julianday(NEW.scheduled_date || ' ' || NEW.start_time) >= julianday('now')
+      AND NEW.end_time = printf('%02d:%02d', (requested + duration) / 60, (requested + duration) % 60)
+      AND requested >= lo AND requested + duration <= hi
+      AND ((mode = 'fixed' AND cadence BETWEEN 1 AND 240 AND requested % cadence = 0)
+        OR (mode = 'service_duration' AND (requested - lo) % duration = 0)
+        OR (mode = 'consecutive' AND requested = (
+          SELECT min(start) FROM boundaries
+          WHERE start >= w.lo AND start + w.duration <= w.hi
+            AND julianday(NEW.scheduled_date || ' ' || printf('%02d:%02d', start / 60, start % 60)) >= julianday('now')
+            AND NOT EXISTS (SELECT 1 FROM occupied o WHERE o.lo < start + w.duration AND o.hi > start)
+        )))
   );
 END;
 -- Cascading SQLite deletes also fire these triggers, so sidecar rows cannot

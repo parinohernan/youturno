@@ -21,6 +21,8 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
   const [color, setColor] = useState(staff?.color || COLORS[0]);
   const [saving, setSaving] = useState(false);
   const [hours, setHours] = useState<WeeklyHours | null>(staff?.working_hours ?? null);
+  const [schedulingMode, setSchedulingMode] = useState<NonNullable<Staff["scheduling_mode"]>>(staff?.scheduling_mode ?? "fixed");
+  const [schedulingInterval, setSchedulingInterval] = useState(staff?.scheduling_interval ?? 30);
   const [scheduleError, setScheduleError] = useState("");
   const isEditing = staff !== undefined;
 
@@ -28,10 +30,14 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
     if (!name.trim()) { setError(strings.nameRequired); return; }
     const invalid = hours && hoursError(hours);
     if (invalid) { setScheduleError(invalid); return; }
+    if (!Number.isInteger(schedulingInterval) || schedulingInterval < 1 || schedulingInterval > 240) {
+      setScheduleError("El intervalo debe ser un número entero entre 1 y 240 minutos."); return;
+    }
     setSaving(true);
     setScheduleError("");
     try {
-      const data = { name: name.trim(), email, phone, title, color, working_hours: hours, service_ids: serviceIds };
+      const data = { name: name.trim(), email, phone, title, color, working_hours: hours, service_ids: serviceIds,
+        scheduling_mode: schedulingMode, scheduling_interval: schedulingInterval };
       if (staff) await updateStaff(staff.id, data);
       else await addStaff(data);
       onClose();
@@ -70,7 +76,7 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
           </div>
           <div className="space-y-1.5">
             <Label>Color</Label>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {COLORS.map((c) => (
                 <button
                   key={c}
@@ -81,6 +87,33 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
               ))}
             </div>
           </div>
+          <fieldset disabled={saving} className="space-y-2 min-w-0">
+            <legend className="text-sm font-medium">Horarios de reserva pública</legend>
+            <Label htmlFor="scheduling-mode">Método de agenda</Label>
+            <select id="scheduling-mode" value={schedulingMode} className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              aria-describedby="scheduling-help" onChange={(event) => {
+                setSchedulingMode(event.currentTarget.value as NonNullable<Staff["scheduling_mode"]>);
+                // Do not let an unfinished hidden cadence prevent another method's save.
+                if (!Number.isInteger(schedulingInterval) || schedulingInterval < 1 || schedulingInterval > 240) setSchedulingInterval(staff?.scheduling_interval ?? 30);
+                setScheduleError("");
+              }}>
+              <option value="consecutive">Agenda consecutiva</option>
+              <option value="fixed">Intervalo fijo</option>
+              <option value="service_duration">Según duración del servicio</option>
+            </select>
+            <p id="scheduling-help" className="text-xs text-muted-foreground">
+              {schedulingMode === "consecutive" ? "Ofrece solo el primer horario libre en cada tramo de trabajo, por ejemplo mañana y tarde, donde cabe el servicio completo." :
+                schedulingMode === "fixed" ? "Permite elegir inicios cada X minutos, alineados desde las 00:00. La duración del servicio se ocupa completa, sin redondearla al intervalo." :
+                  "Separa los inicios por la duración del servicio elegido, desde el comienzo de cada tramo de trabajo. Los horarios ocupados se omiten sin reiniciar la secuencia."}
+            </p>
+            {schedulingMode === "fixed" && <div className="space-y-1.5">
+              <Label htmlFor="scheduling-interval">Minutos entre inicios</Label>
+              <Input id="scheduling-interval" type="number" min={1} max={240} step={1} value={schedulingInterval}
+                onChange={(event) => setSchedulingInterval(Number(event.currentTarget.value))} />
+              <p className="text-xs text-muted-foreground">Entre 1 y 240 minutos. Se conserva al cambiar de método.</p>
+            </div>}
+            <p className="text-xs text-muted-foreground">No cambia turnos existentes ni la agenda manual. Solo se ofrecen horarios futuros dentro del horario de la empresa y del profesional.</p>
+          </fieldset>
           <div className="space-y-2">
             <fieldset disabled={saving} className="space-y-2">
               <legend className="text-sm font-medium">Servicios que ofrece</legend>

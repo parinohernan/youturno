@@ -1,12 +1,64 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toMinutes, overlaps, findConflicts, describeConflicts, minutesToTime, weekdayOf, parseBusinessHours, normalizeHours, effectiveWindows, fitsWindows,
-  windowOnDate, slotStarts, availableSlots, type Busy, type Interval } from "./scheduling.ts";
+  windowOnDate, slotStarts, availableSlots, publicStarts, bookingFloor, type Busy, type Interval } from "./scheduling.ts";
 
 const appt = (start_time: string, end_time: string, label = "Jamie Rivera"): Busy =>
   ({ kind: "appointment", start_time, end_time, label });
 const block = (start_time: string, end_time: string, label = "Lunch"): Busy =>
   ({ kind: "blocked", start_time, end_time, label });
+
+test("consecutive offers one earliest full fit per original work interval, not per busy gap", () => {
+  const windows = [{ start: 550, end: 780 }, { start: 960, end: 1200 }];
+  const policy = { scheduling_mode: "consecutive" as const };
+  assert.deepEqual(publicStarts(windows, 30, [], policy), ["09:10", "16:00"]);
+  const busy = [block("09:10", "09:23"), appt("09:40", "10:17"), block("16:00", "16:09")];
+  assert.deepEqual(publicStarts(windows, 30, busy, policy), ["10:17", "16:09"]);
+  assert.deepEqual(publicStarts(windows, 30, busy, policy, 1071), ["17:51"]);
+  assert.deepEqual(publicStarts(windows, 30, [block("09:10", "12:31"), block("16:00", "20:00")], policy), []);
+  assert.deepEqual(publicStarts(windows, 30, [block("09:10", "12:30")], policy), ["12:30", "16:00"]);
+  assert.deepEqual(publicStarts(windows, 250, [], policy), []);
+});
+
+for (const cadence of [5, 10, 15, 20, 30, 60]) {
+  for (const duration of [10, 30, 60]) {
+    test(`fixed ${cadence} stays midnight-aligned with independent duration ${duration}`, () => {
+      const starts = publicStarts([{ start: 550, end: 780 }], duration, [block("10:03", "10:21")],
+        { scheduling_mode: "fixed", scheduling_interval: cadence }, 557);
+      const expected = Array.from({ length: 1440 }, (_, i) => i)
+        .filter((i) => i >= 557 && i + duration <= 780 && i % cadence === 0 && !(i < 621 && i + duration > 603))
+        .map(minutesToTime);
+      assert.deepEqual(starts, expected);
+    });
+  }
+}
+
+for (const duration of [10, 30, 45, 60]) {
+  test(`service duration ${duration} anchors each split interval, never restarts after busy`, () => {
+    const windows = [{ start: 550, end: 780 }, { start: 970, end: 1080 }];
+    const starts = publicStarts(windows, duration, [appt("09:10", "09:27"), block("10:05", "10:24")],
+      { scheduling_mode: "service_duration", scheduling_interval: 5 });
+    const expected = windows.flatMap((w) => Array.from({ length: 1440 }, (_, i) => i)
+      .filter((i) => i >= w.start && i + duration <= w.end && (i - w.start) % duration === 0
+        && !(i < 567 && i + duration > 550) && !(i < 624 && i + duration > 605)).map(minutesToTime));
+    assert.deepEqual(starts, expected);
+    assert.ok(!starts.includes("09:27"));
+  });
+}
+
+test("public clock uses exact valid dates and UTC minute ceiling without shifting cadence", () => {
+  const now = new Date("2037-11-02T09:10:00.001Z");
+  assert.equal(bookingFloor("2037-11-02", now), 551);
+  assert.equal(bookingFloor("2037-11-02", new Date("2037-11-02T09:10:00Z")), 550);
+  assert.equal(bookingFloor("2037-11-01", now), Infinity);
+  assert.equal(bookingFloor("2037-11-03", now), 0);
+  assert.equal(bookingFloor("2037-02-30", now), Infinity);
+  const windows = [{ start: 550, end: 610 }];
+  assert.deepEqual(publicStarts(windows, 30, [], { scheduling_mode: "consecutive" }, 551), ["09:11"]);
+  assert.deepEqual(publicStarts(windows, 30, [], { scheduling_mode: "service_duration" }, 551), ["09:40"]);
+  assert.deepEqual(publicStarts(windows, 30, [], { scheduling_mode: "fixed" }, 551), ["09:30"]);
+  for (const duration of [0, -1, 1.5, NaN]) assert.deepEqual(publicStarts(windows, duration, []), []);
+});
 
 test("toMinutes reads wall clock, and rejects nonsense", () => {
   assert.equal(toMinutes("00:00"), 0);

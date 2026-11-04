@@ -19,8 +19,13 @@ export function companyUpgrade(columns) {
 }
 
 export function staffUpgrade(columns) {
-  return columns.length && !columns.some((column) => column.name === "working_hours")
-    ? "ALTER TABLE staff ADD COLUMN working_hours TEXT DEFAULT NULL;" : "";
+  if (!columns.length) return "";
+  const names = new Set(columns.map((column) => column.name));
+  return [
+    !names.has("working_hours") ? "ALTER TABLE staff ADD COLUMN working_hours TEXT DEFAULT NULL;" : "",
+    !names.has("scheduling_mode") ? "ALTER TABLE staff ADD COLUMN scheduling_mode TEXT NOT NULL DEFAULT 'fixed' CHECK (scheduling_mode IN ('consecutive', 'fixed', 'service_duration'));" : "",
+    !names.has("scheduling_interval") ? "ALTER TABLE staff ADD COLUMN scheduling_interval INTEGER NOT NULL DEFAULT 30 CHECK (typeof(scheduling_interval) = 'integer' AND scheduling_interval BETWEEN 1 AND 240);" : "",
+  ].filter(Boolean).join("\n");
 }
 
 export function admissionUpgrade(columns) {
@@ -46,6 +51,7 @@ function main() {
     console.log(upgrade || "No existing columns require upgrade; additive schema/booking guards are still applied with --apply.");
     console.log("Additive schema includes empty staff_services and current-qualification admission guard; no assignments are backfilled.");
     console.log("Additive schema also creates company_booking_appearance (settings and optional cover BLOB); no company designs are populated. Existing rows use defaults.");
+    console.log("Staff scheduling defaults to fixed/30; current policy admission guard is installed without moving appointments or changing existing settings.");
     console.log("Preview only. To apply: pnpm migrate:local --apply --backup /absolute/path/to/new-backup.sql (stop the dev server first).");
     return;
   }

@@ -16,6 +16,48 @@ export type Interval = { start: number; end: number };
 /** Minutes between candidate start times shown to a customer. */
 export const SLOT_MINUTES = 30;
 
+export type SchedulingMode = "consecutive" | "fixed" | "service_duration";
+export type SchedulingPolicy = { scheduling_mode?: SchedulingMode; scheduling_interval?: number };
+
+/** Earliest whole minute not in the past (UTC, matching stored booking times). */
+export function bookingFloor(date: string, now = new Date()): number {
+  if (weekdayOf(date) === null) return Infinity;
+  const today = now.toISOString().slice(0, 10);
+  if (date < today) return Infinity;
+  return date > today ? 0 : Math.ceil((now.getTime() - Date.parse(`${today}T00:00:00Z`)) / 60000);
+}
+
+/** Public starts, keeping original effective intervals intact across busy gaps. */
+export function publicStarts(windows: Interval[], duration: number, busy: Busy[], policy: SchedulingPolicy = {}, earliest = 0): string[] {
+  if (!Number.isSafeInteger(duration) || duration <= 0) return [];
+  const mode = policy.scheduling_mode ?? "fixed";
+  const cadence = policy.scheduling_interval ?? SLOT_MINUTES;
+  if (!["consecutive", "fixed", "service_duration"].includes(mode) || !Number.isSafeInteger(cadence) || cadence < 1 || cadence > 240) return [];
+  const occupied = busy.flatMap((item) => {
+    const start = toMinutes(item.start_time), end = toMinutes(item.end_time);
+    return start === null || end === null || start >= end ? [] : [{ start, end }];
+  }).sort((a, b) => a.start - b.start);
+  const result: string[] = [];
+  for (const window of windows) {
+    if (mode === "consecutive") {
+      let start = Math.max(window.start, earliest);
+      for (const interval of occupied) {
+        if (start + duration <= interval.start) break;
+        if (start < interval.end) start = interval.end;
+      }
+      if (start + duration <= window.end) result.push(minutesToTime(start));
+    } else {
+      const step = mode === "fixed" ? cadence : duration;
+      const anchor = mode === "fixed" ? 0 : window.start;
+      let start = anchor + Math.ceil((Math.max(window.start, earliest) - anchor) / step) * step;
+      for (; start + duration <= window.end; start += step) {
+        if (!occupied.some((interval) => overlaps({ start, end: start + duration }, interval))) result.push(minutesToTime(start));
+      }
+    }
+  }
+  return [...new Set(result)].sort();
+}
+
 /** `720` -> `"12:00"`, the inverse of `toMinutes`. */
 export function minutesToTime(minutes: number): string {
   const h = Math.floor(minutes / 60);

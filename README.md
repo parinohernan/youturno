@@ -25,10 +25,13 @@ One deployment can operate **many companies at once** (multi-tenant). See [Multi
 git clone https://github.com/parinohernan/youturno.git
 cd youturno
 pnpm install
+pnpm migrate:local
+# Apply explicitly with a new absolute backup path (see migration section).
+pnpm migrate:local --apply --backup /absolute/private/path/unused-initial-backup.sql
 pnpm run dev
 ```
 
-1. `pnpm run dev` applies the schema and the additive legacy migration to **local D1**, then starts the UI (Vite, usually `http://localhost:5173`) and the API (`wrangler`, port `8787`).
+1. Migrate local D1 explicitly before starting. `pnpm run dev` only starts the UI (Vite, usually `http://localhost:5173`) and the API (`wrangler`, port `8787`); it does not migrate the database.
 2. Before the first start, create `.dev.vars` with `AUTH_SECRET=<random secret of at least 32 characters>`. The file is gitignored; keep it private. On production, configure the Worker secret through your own deployment tooling.
 3. Sign in from the UI. Local D1 state persists in `.wrangler/`.
 
@@ -49,11 +52,25 @@ A single deployment hosts many companies with server-enforced isolation:
 
 The migration is additive and repeatable: it adds `companies` and `tenant_ownership`, associates existing business rows with one legacy company, and preserves all original tables, IDs, foreign keys, and counter values. It never reassigns existing ownership, and empty databases remain empty.
 
-1. Stop the dev server and back up first — for local D1: `pnpm exec wrangler d1 export youturno-db --local --output=backup.sql` (store the export outside the repository).
-2. Run `pnpm migrate:local` (or just start `pnpm dev`, which applies it).
-3. Keep `.wrangler/` intact — never reset local D1 to perform this migration.
+1. Stop the API. From the project directory, run `pnpm migrate:local` to preview missing columns.
+2. Run `pnpm migrate:local --apply --backup /absolute/private/path/unused-backup.sql` with a new path outside the repository. The script verifies a nonempty backup before changing schema.
+3. Restart the API. Keep `.wrangler/` intact — never reset local D1 to perform this migration.
 
-For an existing deployment, back up first, then apply `src/server/schema.sql` followed by `src/server/migrate-legacy.sql` using that deployment's own D1 migration procedure.
+These commands support **Wrangler local D1 only**, including a VPS running that same runtime and default persistence directory. They do not support `--remote` or a different persistence location. Match the running API's database before applying. Applying `schema.sql` alone does not upgrade existing columns. For other runtimes, the operator must adapt the introspection/additive column upgrades and schema guards to that deployment's backup/migration tooling. VPS updates are the operator's responsibility.
+
+### Public scheduling upgrade
+
+Existing staff gain `scheduling_mode = 'fixed'` and `scheduling_interval = 30`, preserving the existing public cadence until edited in **Equipo**. Run the preview/apply commands above before starting the new API. The migration also installs the versioned public admission policy trigger. It does not change existing appointments, staff schedules or service assignments.
+
+| Method | Offered starts |
+|--------|----------------|
+| Consecutive | Only the earliest full-service fit in each effective work interval (morning and afternoon separately). Busy gaps remain part of that interval, not additional choices. |
+| Fixed interval | Every X minutes on a midnight-aligned grid; X is an integer from 1 to 240, default 30. For a 09:10 opening and X=30, the first start is 09:30. |
+| Service duration | Every selected-service duration from each effective interval's opening. At 09:10 with 45-minute service: 09:10, 09:55, 10:40. Occupied starts are filtered without restarting the sequence. |
+
+Effective intervals intersect company and professional hours. Missing personal days inherit; explicit empty/null days close. All modes occupy the full service duration, allow back-to-back boundaries, reject gaps/conflicts and exclude past starts. Times remain UTC; consecutive starts today use the next whole minute when seconds have elapsed. Switching methods preserves the saved fixed interval. Manual tenant appointments retain their existing explicit-overlap policy.
+
+“Cualquiera” unions eligible professionals' actual candidates and assigns only a professional accepting the selected start. Public admission rechecks current mode/cadence, earliest availability, service duration, qualification, activity, hours and conflicts inside the atomic D1 batch, before any client or appointment insert. A stale selection returns `409`; malformed requests return `400`.
 
 ### Company social links upgrade
 

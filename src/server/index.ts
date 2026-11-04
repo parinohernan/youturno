@@ -3,7 +3,7 @@ import { query, get, run } from "./db.js";
 import { safeSocialUrl } from "../shared/social-links.js";
 import { boundedBody, BodyTooLarge, MAX_LOGO_BYTES, validLogo } from "./company-logo.js";
 import { appearanceError, readAppearance, isColor } from "../shared/booking-appearance.js";
-import { findConflicts, describeConflicts, toMinutes, slotStarts, minutesToTime, parseBusinessHours, windowsOnDate, effectiveWindows, effectiveWeeklyHours, fitsWindows, normalizeHours, weekdayOf, type Busy } from "./scheduling.js";
+import { findConflicts, describeConflicts, toMinutes, publicStarts, bookingFloor, minutesToTime, parseBusinessHours, windowsOnDate, effectiveWindows, effectiveWeeklyHours, fitsWindows, normalizeHours, type Busy, type SchedulingPolicy } from "./scheduling.js";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { COOKIE, CUSTOMER_COOKIE, CUSTOMER_STATE_COOKIE, CUSTOMER_SECONDS, hashPassword, verifyPassword,
   signToken, verifyToken, signCustomerToken, verifyCustomerToken, signCustomerState, verifyCustomerState, randomNonce,
@@ -382,6 +382,8 @@ const BusinessHoursSchema = z.object({
 const StaffHoursSchema = BusinessHoursSchema.refine((value) => normalizeHours(value, true) !== null,
   "Invalid hours: use HH:mm, increasing non-overlapping intervals").transform((value) => normalizeHours(value, true)!).nullable();
 
+const SchedulingModeSchema = z.enum(["consecutive", "fixed", "service_duration"]);
+const SchedulingIntervalSchema = z.number().int().min(1).max(240);
 const StaffSchema = z.object({
   id: z.number().int(),
   name: z.string(),
@@ -391,6 +393,8 @@ const StaffSchema = z.object({
   color: z.string(),
   active: z.number().int(),
   working_hours: BusinessHoursSchema.nullable().optional(),
+  scheduling_mode: SchedulingModeSchema,
+  scheduling_interval: SchedulingIntervalSchema,
   service_ids: z.array(z.number().int()),
   appointment_count: z.number().int().optional(),
   completed_appointment_count: z.number().int().optional(),
@@ -1311,8 +1315,10 @@ const createStaff = createRoute({
       title: z.string().optional(),
       color: z.string().optional(),
       working_hours: StaffHoursSchema.optional(),
+      scheduling_mode: SchedulingModeSchema.optional(),
+      scheduling_interval: SchedulingIntervalSchema.optional(),
       service_ids: ServiceIdsSchema.optional(),
-    }) } } },
+    }).strict() } } },
   },
   responses: { 201: { description: "Created", content: { "application/json": { schema: z.object({ staff: StaffSchema }) } } }, 400: { description: "Invalid service assignment", content: { "application/json": { schema: ErrorSchema } } } },
 });
@@ -1324,8 +1330,8 @@ app.openapi(createStaff, async (c) => {
   let result;
   try {
     result = await db.batch([
-      db.prepare("INSERT INTO staff (name, email, phone, title, color, working_hours) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(body.name, body.email || "", body.phone || "", body.title || "", body.color || "#7c3aed", body.working_hours == null ? null : JSON.stringify(body.working_hours)),
+      db.prepare("INSERT INTO staff (name, email, phone, title, color, working_hours, scheduling_mode, scheduling_interval) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(body.name, body.email || "", body.phone || "", body.title || "", body.color || "#7c3aed", body.working_hours == null ? null : JSON.stringify(body.working_hours), body.scheduling_mode ?? "fixed", body.scheduling_interval ?? 30),
       db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('staff', last_insert_rowid(), ?)").bind(tenant(c)),
       // One INSERT reads the ownership rowid before any mapping can change it.
       db.prepare(`INSERT INTO staff_services (company_id, staff_id, service_id)
@@ -1355,8 +1361,10 @@ const updateStaff = createRoute({
       color: z.string().optional(),
       active: z.number().int().optional(),
       working_hours: StaffHoursSchema.optional(),
+      scheduling_mode: SchedulingModeSchema.optional(),
+      scheduling_interval: SchedulingIntervalSchema.optional(),
       service_ids: ServiceIdsSchema.optional(),
-    }) } } },
+    }).strict() } } },
   },
   responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 400: { description: "Invalid service assignment", content: { "application/json": { schema: ErrorSchema } } }, 404: NotFoundResponse },
 });
@@ -1853,7 +1861,8 @@ app.put("/api/company/business-hours", async (c) => {
 
 // Until business timezones are configurable, booking wall clocks explicitly use UTC.
 function futureBooking(date: string, time = "23:59"): boolean {
-  return weekdayOf(date) !== null && `${date}T${time}` > new Date().toISOString().slice(0, 16);
+  const start = toMinutes(time);
+  return start !== null && start >= bookingFloor(date);
 }
 
 /** Open the owner can set: the public link customers are invited through. */
@@ -1975,10 +1984,9 @@ app.openapi(publicSlots, async (c) => {
   }
   const hours = parseBusinessHours(company.business_hours);
   const candidates = await Promise.all(staffIds.map(async (staffId) => {
-    const member = await get<{ working_hours?: string | null }>("SELECT * FROM staff WHERE id = ?", [staffId]);
+    const member = await get<SchedulingPolicy & { working_hours?: string | null }>("SELECT * FROM staff WHERE id = ?", [staffId]);
     const busy = await busyForOwner(c.env.DB, company.id, staffId, query.date);
-    return effectiveWindows(hours, member?.working_hours, query.date).flatMap((window) => slotStarts(window, service.duration))
-      .filter((time) => futureBooking(query.date, time) && findConflicts(time, addMinutes(time, service.duration), busy).length === 0);
+    return publicStarts(effectiveWindows(hours, member?.working_hours, query.date), service.duration, busy, member, bookingFloor(query.date));
   }));
   return c.json({
     slots: [...new Set(candidates.flat())].sort(),
@@ -2030,35 +2038,37 @@ app.openapi(publicBook, async (c) => {
   if (start === null) return c.json({ error: "Los horarios deben tener formato HH:MM" }, 400);
   const hours = parseBusinessHours(company.business_hours);
   const endTime = addMinutes(body.start_time, service.duration);
-  if (start % 30 !== 0 || !fitsWindows(windowsOnDate(hours, body.date), start, service.duration)) {
-    return c.json({ error: "Slot is no longer available" }, 409);
+  if (!fitsWindows(windowsOnDate(hours, body.date), start, service.duration)) {
+    return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
   }
 
   let staffId: number | null = null;
   if (body.staff_id !== undefined) {
-    const member = await get<{ id: number; working_hours?: string | null }>(
+    const member = await get<SchedulingPolicy & { id: number; working_hours?: string | null }>(
       `SELECT s.* FROM staff s JOIN tenant_ownership o ON o.resource_type = 'staff'
         AND o.resource_id = s.id JOIN staff_services ss ON ss.staff_id = s.id AND ss.company_id = o.company_id
         WHERE s.id = ? AND o.company_id = ? AND s.active = 1 AND ss.service_id = ?`,
        [body.staff_id, company.id, body.service_id]);
     if (!member) return c.json({ error: "El profesional no ofrece este servicio" }, 400);
-    if (!fitsWindows(effectiveWindows(hours, member.working_hours, body.date), start, service.duration)) return c.json({ error: "Slot is no longer available" }, 409);
+    if (!publicStarts(effectiveWindows(hours, member.working_hours, body.date), service.duration,
+      await busyForOwner(db, company.id, member.id, body.date), member, bookingFloor(body.date)).includes(body.start_time)) return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
     staffId = member.id;
   } else {
-    for (const candidate of await query<{ id: number; working_hours?: string | null }>(`SELECT s.* FROM staff s JOIN tenant_ownership o
+    for (const candidate of await query<SchedulingPolicy & { id: number; working_hours?: string | null }>(`SELECT s.* FROM staff s JOIN tenant_ownership o
         ON o.resource_type = 'staff' AND o.resource_id = s.id
         JOIN staff_services ss ON ss.staff_id = s.id AND ss.company_id = o.company_id AND ss.service_id = ?
         WHERE o.company_id = ? AND s.active = 1 ORDER BY s.name ASC, s.id ASC`, [body.service_id, company.id])) {
-      if (fitsWindows(effectiveWindows(hours, candidate.working_hours, body.date), start, service.duration) && findConflicts(body.start_time, endTime, await busyForOwner(c.env.DB, company.id, candidate.id, body.date)).length === 0) {
+      if (publicStarts(effectiveWindows(hours, candidate.working_hours, body.date), service.duration,
+        await busyForOwner(db, company.id, candidate.id, body.date), candidate, bookingFloor(body.date)).includes(body.start_time)) {
         staffId = candidate.id;
         break;
       }
     }
-    if (staffId === null) return c.json({ error: "Slot is no longer available" }, 409);
+    if (staffId === null) return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
   }
   if (staffId !== null && findConflicts(body.start_time, endTime,
     await busyForOwner(c.env.DB, company.id, staffId, body.date)).length > 0) {
-    return c.json({ error: "Slot is no longer available" }, 409);
+    return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
   }
 
   // One file per customer per company, matched on the verified email.
@@ -2103,7 +2113,7 @@ app.openapi(publicBook, async (c) => {
     db.prepare("DELETE FROM public_booking_admission WHERE id = ?").bind(admissionId),
   ]);
   } catch (cause) {
-    if (String(cause).includes("public booking conflict")) return c.json({ error: "Slot is no longer available" }, 409);
+    if (String(cause).includes("public booking conflict")) return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
     throw cause;
   }
   const inserted = results[3 + clientStatements.length];
