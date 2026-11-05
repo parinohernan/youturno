@@ -9,12 +9,13 @@ export function safeWebsite(value: string | undefined): string | null {
   } catch { return null; }
 }
 
-export function CompanyPublicDetails({ company, preview = false }: { company: Partial<CompanyProfile>; preview?: boolean }) {
+export function CompanyPublicDetails({ company, preview = false, identityOnly = false, hideLogo = false }: { company: Partial<CompanyProfile>; preview?: boolean; identityOnly?: boolean; hideLogo?: boolean }) {
   const website = safeWebsite(company.website);
-  return <div className="space-y-2 text-sm">
-    {company.logo_url && (/^\/api\/public\/[a-z0-9-]+\/logo\?v=[\w-]+$/.test(company.logo_url) ||
+  return <div className={`company-public-details space-y-2 text-sm${identityOnly ? " company-identity-only" : ""}`}>
+    {!hideLogo && company.logo_url && (/^\/api\/public\/[a-z0-9-]+\/logo\?v=[\w-]+$/.test(company.logo_url) ||
       (preview && /^\/api\/company\/logo\?v=[\w-]+$/.test(company.logo_url))) &&
       <img className="mx-auto block h-28 w-28 rounded object-contain object-center" src={company.logo_url} alt={`Logo de ${company.name}`} />}
+    {!identityOnly && <>
     {company.description && <p className="whitespace-pre-line">{company.description}</p>}
     {company.address && <p className="whitespace-pre-line">Ubicación: {company.address}</p>}
     {company.phone && <p>Teléfono: {company.phone}</p>}
@@ -28,5 +29,6 @@ export function CompanyPublicDetails({ company, preview = false }: { company: Pa
             aria-label={`${label} de ${company.name || "la empresa"}`}>{label}</a> : null;
         })}
       </nav>}
+    </>}
   </div>;
 }

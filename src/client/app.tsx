@@ -20,8 +20,9 @@ import { BookingAppearanceEditor } from "./components/booking-appearance-editor"
 import { ErrorBanner } from "./components/error-banner";
 import { BookPublic } from "./components/book-public";
 import { LegalPage, legalPageForPath } from "./components/legal-pages";
+import { ProfessionalPortal } from "./components/professional-portal";
 
-type Session = { email: string; role: "superadmin" | "tenant"; company_id: number | null;
+type Session = { email: string; role: "superadmin" | "tenant" | "professional"; company_id: number | null; staff_id: number | null;
   company_name: string | null; company_status: string | null; csrf: string };
 
 /** /book/{slug} — public booking lives outside the tenant session gate. */
@@ -38,6 +39,7 @@ export function App() {
 }
 
 function StaffApp() {
+  const professionalEntry = /^\/profesionales\/login\/?$/.test(window.location.pathname);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -59,17 +61,27 @@ function StaffApp() {
     setSession(null);
   };
   if (loading) return <div className="p-8">Cargando...</div>;
-  if (!session) return <LoginPage error={error} onSubmit={async (event) => {
-      event.preventDefault();
-      const data = new FormData(event.currentTarget);
+  if (!session) return <LoginPage professional={professionalEntry} error={error} onSubmit={async (event) => {
+       event.preventDefault();
+       const form = event.currentTarget;
+       const data = new FormData(form);
+       const passwordInput = form.elements?.namedItem("password") as HTMLInputElement | null;
+       if (passwordInput) passwordInput.value = "";
       try {
         const response = await api<{ csrf: string }>("POST", "/api/auth/login", {
           email: data.get("email"), password: data.get("password"),
+          ...(professionalEntry ? { professional_portal: true } : {}),
         });
         setCsrfToken(response.csrf); setError(""); await refresh();
-      } catch (cause) { setError((cause as Error).message); }
-    }} />;
+       } catch (cause) { setError((cause as Error).message); }
+     }} />;
+  if (professionalEntry && session.role !== "professional") return <main className="mx-auto max-w-sm space-y-4 p-8">
+    <h1 className="text-xl font-bold">Portal del profesional</h1>
+    <p>Esta cuenta es de administración y no tiene un acceso profesional vinculado.</p>
+    <a className="block underline" href="/">Ir a administración</a><button onClick={logout}>Salir</button>
+  </main>;
   if (session.role === "superadmin") return <AdminPanel session={session} refresh={refresh} logout={logout} />;
+  if (session.role === "professional") return <ProfessionalPortal key={`${session.email}:${session.company_id}:${session.staff_id}`} companyName={session.company_name} logout={logout} />;
   if (!session.company_id) return <main className="mx-auto max-w-sm space-y-4 p-8">
     <h1 className="text-xl font-bold">Configurar empresa</h1>
     <form onSubmit={async (event) => {
@@ -107,13 +119,15 @@ function AdminPanel({ session, refresh, logout }: { session: Session; refresh: (
         form.reset(); setError(""); await load();
       } catch (cause) { setError((cause as Error).message); }
     }}>
-      <h2 className="font-semibold">Crear cuenta</h2>
+      <h2 className="font-semibold">Crear cuenta de administración de empresa</h2>
       <input className="w-full rounded border p-2" name="email" type="email" placeholder="Correo electrónico" required />
       <input className="w-full rounded border p-2" name="password" type="password" minLength={12} placeholder="Contraseña inicial (mínimo 12 caracteres)" required />
       <select className="w-full rounded border p-2" name="company_id" key={companies.length} defaultValue="">
-        <option value="">Primera cuenta: configura su empresa</option>
-        {companies.map((company) => <option key={company.id} value={company.id}>Cuenta adicional: {company.name}</option>)}
-      </select><button className="rounded bg-violet-700 px-4 py-2 text-white">Crear cuenta</button>
+        <option value="">Primer administrador: configura su empresa</option>
+        {companies.map((company) => <option key={company.id} value={company.id}>Administrador adicional: {company.name}</option>)}
+      </select>
+      <p className="text-sm">El acceso profesional se configura desde Equipo → Editar, por la administración de cada empresa.</p>
+      <button className="rounded bg-violet-700 px-4 py-2 text-white">Crear administrador de empresa</button>
       <label className="block"><input type="checkbox" name="agreement_confirmed" /> Confirmo el acuerdo para cuentas adicionales</label>
       <p className="text-sm">Cada nueva empresa queda pendiente de activación antes de usar el sistema.</p>
     </form>

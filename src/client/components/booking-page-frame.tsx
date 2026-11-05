@@ -1,7 +1,8 @@
 import type { ComponentChildren } from "preact";
+import { LegalLinks } from "./legal-pages";
 import { appearanceDecoration, buttonForeground, defaultAppearance, isColor, type BookingAppearance } from "../../shared/booking-appearance";
 
-/** The same scoped palette paints the real page and its noninteractive draft preview. */
+/** The same scoped palette paints the public wizard and its fictional draft preview. */
 export function BookingPageFrame({ appearance, preview = false, children }: {
   appearance?: BookingAppearance; preview?: boolean; children: ComponentChildren;
 }) {
@@ -11,7 +12,7 @@ export function BookingPageFrame({ appearance, preview = false, children }: {
   }
   const decoration = appearanceDecoration(theme);
   return <div className="booking-appearance min-w-0 w-full bg-background text-foreground" data-booking-preview={preview || undefined}
-    inert={preview || undefined} style={{
+    onClickCapture={preview ? (event) => { if ((event.target as Element).closest("a")) event.preventDefault(); } : undefined} style={{
       containerType: "inline-size", containerName: "booking",
       minHeight: preview ? undefined : "100dvh",
       "--background": theme.background, "--foreground": theme.text,
@@ -24,5 +25,5 @@ export function BookingPageFrame({ appearance, preview = false, children }: {
       "--booking-shadow": decoration.shadow,
       "--ring": theme.text, "--border": decoration.border,
       "--input": theme.text,
-    }}>{children}</div>;
+    }}>{children}<footer className="booking-legal mx-auto max-w-2xl px-4 pb-6"><LegalLinks /></footer></div>;
 }

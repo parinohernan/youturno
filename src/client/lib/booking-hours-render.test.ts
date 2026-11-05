@@ -50,7 +50,7 @@ test("public schedule card re-renders with current service and professional sele
     return scheduleCard(node.props?.children);
   }
   const render = (serviceId: number | null, staffId: number | null) => {
-    globals.__bookingRender = { index: 0, values: { 0: "ready", 1: overview, 2: serviceId, 3: staffId, 12: false } };
+    globals.__bookingRender = { index: 0, values: { 0: "ready", 1: overview, 2: serviceId, 3: staffId, 9: true, 12: false } };
     const tree = BookPublic({ slug: "salon" });
     const card = scheduleCard(tree);
     assert.ok(card, "find the schedule card independently of presentation wrappers");

@@ -15,6 +15,7 @@ One deployment can operate **many companies at once** (multi-tenant). See [Multi
 - **Service catalog** — duration, price, color, category grouping
 - **Product inventory** — cost/price, stock levels, low-stock alerts, brand and SKU
 - **Multi-tenant** — many companies on one deployment, server-enforced isolation
+- **Private professional agenda** — own appointments, manual customer contact, completion/cancellation/rescheduling, and in-app polling alerts
 - **Status workflow** — booked → confirmed → in progress → completed (or cancelled / no-show)
 - **Dashboard** — today's appointments, upcoming count, booked service value, low-stock alerts
 - **Dual-mode UI** — human-optimized plus agent-friendly (`?agent`) with always-visible actions and large targets
@@ -39,7 +40,7 @@ pnpm run dev
 
 A single deployment hosts many companies with server-enforced isolation:
 
-- **Roles.** A `superadmin` operates the platform (provisions companies and users); `tenant` users belong to exactly one company.
+- **Roles.** A `superadmin` operates the platform (provisions companies and users); `tenant` administrators manage their company. A server-side `professional_accounts` restriction maps a tenant identity to one professional and exposes `role: "professional"` in its session; it never grants company-wide access.
 - **Company scoping.** Every business route — lists, stats, details, calendar, conflict checks, updates, deletes, and every referenced ID — is restricted to the company resolved server-side from the session. Another company's resource IDs return `404`; invalid references return `400`. Database triggers reject cross-company appointment links.
 - **Server-side authority only.** Company membership is never taken from client input; the server resolves it from the authenticated session for every request.
 - **Onboarding.** An unattached first user names their own company; the company stays **pending** until the platform operator activates it. Additional users require the operator's confirmation.
@@ -57,6 +58,29 @@ The migration is additive and repeatable: it adds `companies` and `tenant_owners
 3. Restart the API. Keep `.wrangler/` intact — never reset local D1 to perform this migration.
 
 These commands support **Wrangler local D1 only**, including a VPS running that same runtime and default persistence directory. They do not support `--remote` or a different persistence location. Match the running API's database before applying. Applying `schema.sql` alone does not upgrade existing columns. For other runtimes, the operator must adapt the introspection/additive column upgrades and schema guards to that deployment's backup/migration tooling. VPS updates are the operator's responsibility.
+
+### Professional portal upgrade
+
+**Migrate before starting the new API.** Use the backup/preview/apply procedure above against the same local D1 persistence used by the running API. On a VPS, the operator must stop that API, make a new private backup, apply the local migration explicitly, and restart it. Never use `--remote` or replace `.wrangler/`. Source deployment alone is not a migration.
+
+The upgrade adds empty `professional_accounts` and `professional_appointment_changes` tables and guards. It does not rebuild `users`, change its role CHECK, alter existing appointments, create users, or restrict existing administrators. Reapplying is safe. Verify existing row counts and `PRAGMA foreign_key_check` before and after. Backups include private customer/authentication data: keep them private and do not attach them to reports.
+
+1. The company administrator identifies the existing active professional's staff ID (the ID in their `/staff/{id}` API record) and supplies it to the platform operator. Professional and company IDs must match; inactive or cross-company assignments are rejected.
+2. In the existing platform **Crear cuenta** form, select the company, enter that staff ID, an individual email, and a password agreed privately with the account holder (minimum 12 characters). Confirm the existing additional-account agreement. Blank staff ID retains the existing company-administrator provisioning behavior; there is no public signup or shared/default password.
+3. The professional uses standard staff login and receives **Mi agenda**, regardless of the private URL opened. No company-wide loader/navigation is mounted. Company administrators retain their existing management screens. This release provisions new restricted accounts; it does not provide a UI to convert or rebind an existing administrator. Disable the linked staff member or revoke the user's session server-side to remove access. Deleted staff leave a denied restriction, never an administrator account.
+
+| Behavior | Boundary |
+|---|---|
+| Agenda | Selected UTC day, own recurring effective hours, and up to 100 upcoming appointments over 90 days. Detail includes only that appointment's contact, services, notes and professional action history, not full client history. |
+| Internal alerts | Poll every 15 seconds while focused, visible and online. First response establishes the baseline; IDs deduplicate later alerts. Failures back off to 120 seconds. No browser permission, push or sound; not instantaneous. |
+| Actions | Own nonterminal appointments (`booked`, `confirmed`, `in_progress`) only. Completion means `completed`, never paid. Cancelled/completed appointments cannot be reopened by the professional. |
+| Rescheduling | Preserves actual booked interval duration, requires current service qualification and a free interval inside both company and staff hours. Public cadence is intentionally not imposed. No overlap override. Legacy appointments without service links remain finalizable/cancellable but require administrator help to reschedule. |
+| Atomicity | SQL admission rechecks current binding/session, assignment/status/snapshot, hours, qualifications and conflicts; audit entry and change commit together. A stale or duplicate action returns `409` without partial history/change. |
+| Contact | Cancellation/rescheduling require explicit acknowledgment to coordinate and notify the customer outside the app. The app records the change but does **not** notify the customer. Private phone supports calling/copying; email remains data only. |
+
+New public Google-authenticated bookings require `contact_phone` at confirmation. Accepted input has 7–15 digits, an optional leading `+`, and common spaces/parentheses/hyphens. Separators are removed; no country code is inferred and no OTP verification is claimed. Each successful booking updates the authenticated customer's existing contact **only within the booked company**, or atomically creates that company's client. Failed bookings cannot update the phone. Phone is not returned in anonymous overview/slots or saved with wizard OAuth intent; re-enter it after a full reload. Old clients without a phone remain manageable.
+
+No email/SMS/WhatsApp delivery, provider integrations, Calendar sync, payment, product checkout, WebSockets or SSE are included. The account's current membership and active staff/company are checked on every private request, and all existing tenant-wide routes are denied to professionals.
 
 ### Public scheduling upgrade
 

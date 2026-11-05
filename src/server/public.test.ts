@@ -135,6 +135,358 @@ const SUNDAY = "2037-11-08";
 const ownCompany1 = (db: DatabaseSync, type: string, id: number) =>
   db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES (?, ?, 1)").run(type, id);
 
+test("public contact phone is required, unverified, normalized and private to the booked company", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  const headers = { cookie: await bookingCookie() };
+  const base = { service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00" };
+  for (const value of [undefined, null, "", "123", "+", "++541155550100", "555 abc 123456", "1".repeat(16), "<script>", 123456789]) {
+    const response = await request("POST", "/api/public/acme/book", { headers, body: { ...base, contact_phone: value } });
+    assert.equal(response.status, 400, String(value));
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM clients").get()?.n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments").get()?.n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM tenant_ownership WHERE resource_type = 'clients'").get()?.n, 0);
+  }
+  const book = (slug: string, body: unknown) => request("POST", `/api/public/${slug}/book`, { headers, body });
+  assert.equal((await book("acme", { ...base, contact_phone: "+54 (11) 5555-0100" })).status, 201);
+  assert.equal(db.prepare("SELECT phone FROM clients").get()?.phone, "+541155550100");
+  assert.equal((await book("acme", { ...base, start_time: "11:00", contact_phone: "020 1234 5678" })).status, 201);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM clients").get()?.n, 1);
+  assert.equal(db.prepare("SELECT phone FROM clients").get()?.phone, "02012345678", "authenticated customer explicitly replaces this company's contact");
+  assert.equal((await book("beauty", { ...base, service_id: 3, staff_id: 3, contact_phone: "+442012345678" })).status, 201);
+  assert.equal(db.prepare("SELECT phone FROM clients WHERE id = 1").get()?.phone, "02012345678");
+  const publicData = JSON.stringify((await request("GET", "/api/public/acme/overview")).body);
+  assert.ok(!publicData.includes("02012345678"));
+  assert.ok(!publicData.includes("client@example.test"));
+  assert.equal((await book("acme", { ...base, contact_phone: "+33123456789" })).status, 409);
+  assert.equal(db.prepare("SELECT phone FROM clients WHERE id = 1").get()?.phone, "02012345678", "conflict cannot partially update contact");
+});
+
+test("concurrent bookings for the same customer reuse one company client atomically", async (t) => {
+  const { db, request, synchronizeBatches } = await twoCompanies(t);
+  const headers = { cookie: await bookingCookie() };
+  synchronizeBatches(2);
+  const result = await Promise.all(["10:00", "12:00"].map((start_time) => request("POST", "/api/public/acme/book", {
+    headers, body: { service_id: 1, staff_id: 1, date: MONDAY, start_time, contact_phone: "+541155550100" } })));
+  assert.deepEqual(result.map((r) => r.status), [201, 201]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM clients").get()?.n, 1);
+  assert.equal(db.prepare("SELECT COUNT(DISTINCT client_id) AS n FROM appointments").get()?.n, 1);
+});
+
+async function professionalFixture(t: Parameters<typeof harness>[0]) {
+  const setup = await twoCompanies(t);
+  const { db } = setup;
+  db.exec(`INSERT INTO users (id, email, password_hash, role, company_id) VALUES
+    (1, 'professional@example.test', 'test', 'tenant', 1), (2, 'owner@example.test', 'test', 'tenant', 1),
+    (3, 'platform@example.test', 'test', 'superadmin', NULL);
+    INSERT INTO professional_accounts VALUES (1, 1, 1);
+    INSERT INTO clients (id, name, email, phone) VALUES (1, 'Own customer', 'own@example.test', '+541155550100'),
+      (2, 'Other customer', 'other@example.test', '+541155550200');
+    INSERT INTO tenant_ownership VALUES ('clients', 1, 1), ('clients', 2, 1);
+    INSERT INTO appointments (id, identifier, client_id, staff_id, status, scheduled_date, start_time, end_time) VALUES
+      (1, 'APT-1', 1, 1, 'confirmed', '${MONDAY}', '10:00', '11:00'),
+      (2, 'APT-2', 2, 2, 'confirmed', '${MONDAY}', '12:00', '13:00');
+    INSERT INTO tenant_ownership VALUES ('appointments', 1, 1), ('appointments', 2, 1);
+    INSERT INTO appointment_services (id, appointment_id, service_id, duration, price) VALUES (1, 1, 1, 60, 40);
+    INSERT INTO tenant_ownership VALUES ('appointment_services', 1, 1);`);
+  db.exec(`INSERT INTO clients (id, name, email, phone) VALUES (3, 'Cross-company customer', 'private@example.test', '+442012345678');
+    INSERT INTO tenant_ownership VALUES ('clients', 3, 2);
+    INSERT INTO appointments (id, identifier, client_id, staff_id, status, scheduled_date, start_time, end_time)
+      VALUES (3, 'APT-3', 3, 3, 'confirmed', '${MONDAY}', '10:00', '12:00');
+    INSERT INTO tenant_ownership VALUES ('appointments', 3, 2);`);
+  const token = await signToken(secret, 1, 0);
+  const headers = { cookie: `__Host-youturno=${token.jwt}`, "x-csrf-token": token.csrf };
+  const expected = () => ({ ...db.prepare("SELECT status, scheduled_date, start_time, end_time FROM appointments WHERE id = 1").get() });
+  const action = (body: Record<string, unknown>, id = 1, extraHeaders = {}) => setup.request("POST", `/api/professional/appointments/${id}/actions`,
+    { headers: { ...headers, ...extraHeaders }, body: { expected: expected(), ...body } });
+  return { ...setup, token, headers, expected, action };
+}
+
+test("professional sessions expose only own agenda and deny every tenant-wide route", async (t) => {
+  const { db, request, headers } = await professionalFixture(t);
+  const session = await request("GET", "/api/auth/session", { headers });
+  assert.equal(session.body.role, "professional"); assert.equal(session.body.staff_id, 1);
+  const agenda = await request("GET", `/api/professional/agenda?date=${MONDAY}&staff_id=2&company_id=2`, { headers });
+  assert.equal(agenda.status, 200);
+  assert.deepEqual(agenda.body.appointments.map((row: any) => row.id), [1]);
+  assert.deepEqual(agenda.body.staff.effective_hours.mon, [["09:00", "18:00"]]);
+  assert.equal(agenda.body.new_booking_ids.length, 0, "initial load is not a new booking alert");
+  assert.ok(!JSON.stringify(agenda.body).includes("other@example.test"));
+  const detail = await request("GET", "/api/professional/appointments/1", { headers });
+  assert.equal(detail.body.appointment.client_phone, "+541155550100");
+  assert.equal(detail.body.appointment.services[0].service_name, "Acme haircut");
+  assert.equal(detail.body.appointment.client_id, undefined, "no client-history selector is exposed");
+  for (const id of [2, 3, 999]) assert.equal((await request("GET", `/api/professional/appointments/${id}`, { headers })).status, 404);
+  for (const path of ["/api/stats", "/api/calendar?start=2037-11-02&end=2037-11-03", "/api/clients", "/api/clients/1",
+    "/api/staff", "/api/staff/all", "/api/services", "/api/products", "/api/appointments", "/api/appointments/1",
+    "/api/company/profile", "/api/company/booking", "/api/company/appearance", "/api/admin/companies", "/api/admin/users", "/api/onboarding/company"]) {
+    assert.equal((await request("GET", path, { headers })).status, 403, path);
+    assert.equal((await request("PUT", path, { headers, body: { name: "Forbidden", staff_id: 2, role: "tenant" } })).status, 403, path);
+  }
+  const owner = await signToken(secret, 2, 0);
+  assert.equal((await request("GET", `/api/professional/agenda?date=${MONDAY}`, { headers: { cookie: `__Host-youturno=${owner.jwt}` } })).status, 403);
+  db.exec("UPDATE appointments SET staff_id = 2 WHERE id = 1");
+  assert.equal((await request("GET", "/api/professional/appointments/1", { headers })).status, 404);
+});
+
+test("professional membership denies inactive, moved, deleted and revoked bindings without elevation", async (t) => {
+  const { db, request, headers } = await professionalFixture(t);
+  const read = () => request("GET", "/api/auth/session", { headers });
+  for (const [change, restore] of [
+    ["UPDATE staff SET active = 0 WHERE id = 1", "UPDATE staff SET active = 1 WHERE id = 1"],
+    ["UPDATE companies SET status = 'disabled' WHERE id = 1", "UPDATE companies SET status = 'active' WHERE id = 1"],
+    ["UPDATE users SET company_id = 2 WHERE id = 1", "UPDATE users SET company_id = 1 WHERE id = 1"],
+    ["DELETE FROM tenant_ownership WHERE resource_type = 'staff' AND resource_id = 1", "INSERT INTO tenant_ownership VALUES ('staff', 1, 1)"],
+  ]) { db.exec(change); assert.equal((await read()).status, 403, change); db.exec(restore); assert.equal((await read()).status, 200); }
+  assert.throws(() => db.exec("UPDATE professional_accounts SET staff_id = 3 WHERE user_id = 1"), /invalid professional binding/);
+  assert.equal((await request("POST", "/api/auth/logout", { headers, body: {} })).status, 200);
+  assert.equal((await read()).status, 401);
+  db.exec("UPDATE users SET session_version = 0 WHERE id = 1; DELETE FROM staff WHERE id = 1");
+  assert.equal(db.prepare("SELECT staff_id FROM professional_accounts WHERE user_id = 1").get()?.staff_id, null);
+  assert.equal((await read()).status, 403);
+});
+
+test("only company admin provisions own professional access; platform staff_id provisioning is rejected", async (t) => {
+  const { db, request, headers } = await professionalFixture(t);
+  const admin = await signToken(secret, 3, 0);
+  const adminHeaders = { cookie: `__Host-youturno=${admin.jwt}`, "x-csrf-token": admin.csrf };
+  const body = { email: "new@example.test", password: "fictional test password", company_id: 1, staff_id: 2, agreement_confirmed: true };
+  assert.equal((await request("POST", "/api/admin/users", { headers, body })).status, 403);
+  const owner = await signToken(secret, 2, 0);
+  assert.equal((await request("POST", "/api/admin/users", { headers: { cookie: `__Host-youturno=${owner.jwt}`, "x-csrf-token": owner.csrf }, body })).status, 403);
+  for (const invalid of [{ ...body, staff_id: 3 }, { ...body, staff_id: 4 }, { ...body, company_id: null }, { ...body, role: "superadmin" }]) {
+    assert.equal((await request("POST", "/api/admin/users", { headers: adminHeaders, body: invalid })).status, 400);
+  }
+  assert.equal((await request("POST", "/api/admin/users", { headers: adminHeaders, body })).status, 400);
+  const ownerHeaders = { cookie: `__Host-youturno=${owner.jwt}`, "x-csrf-token": owner.csrf };
+  const access = { email: body.email, professional_password: body.password };
+  assert.equal((await request("PUT", "/api/staff/2", { headers, body: access })).status, 403);
+  assert.equal((await request("PUT", "/api/staff/2", { headers: adminHeaders, body: access })).status, 403);
+  assert.equal((await request("PUT", "/api/staff/3", { headers: ownerHeaders, body: access })).status, 404);
+  assert.equal((await request("PUT", "/api/staff/4", { headers: ownerHeaders, body: access })).status, 400);
+  const created = await request("PUT", "/api/staff/2", { headers: ownerHeaders, body: access });
+  assert.equal(created.status, 200);
+  assert.deepEqual(created.body, { ok: true });
+  const login = await request("POST", "/api/auth/login", { body: { email: body.email, password: body.password } });
+  assert.equal(login.status, 200);
+  const current = await request("GET", "/api/auth/session", { headers: { cookie: `__Host-youturno=${cookieValue(login.cookies, "__Host-youturno")}` } });
+  assert.equal(current.body.role, "professional"); assert.equal(current.body.staff_id, 2);
+  const ownAgenda = await request("GET", `/api/professional/agenda?date=${MONDAY}`, { headers: { cookie: `__Host-youturno=${cookieValue(login.cookies, "__Host-youturno")}` } });
+  assert.equal(ownAgenda.status, 200);
+  assert.deepEqual(ownAgenda.body.appointments.map((row: any) => row.id), [2]);
+  assert.equal((await request("GET", "/api/clients", { headers: { cookie: `__Host-youturno=${cookieValue(login.cookies, "__Host-youturno")}` } })).status, 403);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_accounts WHERE staff_id = 2").get()?.n, 1);
+  assert.equal(db.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("professional resets revoke only their sessions; blank preserves and email edits sync safely", async (t) => {
+  const { db, request } = await professionalFixture(t);
+  const owner = await signToken(secret, 2, 0);
+  const headers = { cookie: `__Host-youturno=${owner.jwt}`, "x-csrf-token": owner.csrf };
+  const save = (body: unknown) => request("PUT", "/api/staff/2", { headers, body });
+  const login = (email: string, password: string) => request("POST", "/api/auth/login", { body: { email, password, professional_portal: true } });
+  assert.equal((await save({ email: " Professional.New@Example.test ", professional_password: "fictional initial password" })).status, 200);
+  const first = await login("professional.new@example.test", "fictional initial password");
+  assert.equal(first.status, 200);
+  const firstHeaders = { cookie: `__Host-youturno=${cookieValue(first.cookies, "__Host-youturno")}` };
+  const uid = db.prepare("SELECT user_id FROM professional_accounts WHERE staff_id = 2").get()!.user_id;
+  const original = db.prepare("SELECT password_hash, session_version FROM users WHERE id = ?").get(uid);
+  assert.equal((await save({ name: "Updated professional", professional_password: "" })).status, 200);
+  assert.deepEqual(db.prepare("SELECT password_hash, session_version FROM users WHERE id = ?").get(uid), original);
+  assert.equal((await request("GET", "/api/auth/session", { headers: firstHeaders })).status, 200);
+  const tooShort = await save({ professional_password: "short-only" });
+  assert.equal(tooShort.status, 400);
+  assert.ok(!JSON.stringify(tooShort.body).includes("short-only"));
+  assert.equal((await save({ professional_password: "fictional replacement password" })).status, 200);
+  assert.equal((await login("professional.new@example.test", "fictional initial password")).status, 401);
+  assert.equal((await request("GET", "/api/auth/session", { headers: firstHeaders })).status, 401);
+  assert.equal((await request("GET", "/api/auth/session", { headers })).status, 200);
+  const second = await login("professional.new@example.test", "fictional replacement password");
+  assert.equal(second.status, 200);
+  const secondHeaders = { cookie: `__Host-youturno=${cookieValue(second.cookies, "__Host-youturno")}` };
+  assert.equal((await save({ email: " Renamed@Example.test " })).status, 200);
+  assert.equal(db.prepare("SELECT email FROM users WHERE id = ?").get(uid)?.email, "renamed@example.test");
+  assert.equal(db.prepare("SELECT email FROM staff WHERE id = 2").get()?.email, "renamed@example.test");
+  assert.equal((await request("GET", "/api/auth/session", { headers: secondHeaders })).status, 401);
+  assert.equal((await login("professional.new@example.test", "fictional replacement password")).status, 401);
+  assert.equal((await login("renamed@example.test", "fictional replacement password")).status, 200);
+  for (const email of ["", "invalid", "owner@example.test", "platform@example.test", "professional@example.test"]) {
+    const result = await save({ email, name: "Must not persist", professional_password: "fictional rejected password" });
+    assert.equal(result.status, ["", "invalid"].includes(email) ? 400 : 409);
+    assert.ok(!JSON.stringify(result.body).includes("fictional rejected password"));
+    assert.equal(db.prepare("SELECT name FROM staff WHERE id = 2").get()?.name, "Updated professional");
+    assert.equal(db.prepare("SELECT email FROM users WHERE id = ?").get(uid)?.email, "renamed@example.test");
+  }
+  const listing = await request("GET", "/api/staff", { headers });
+  for (const email of ["", "owner@example.test", "professional@example.test"]) {
+    assert.equal((await save({ email })).status, email === "" ? 400 : 409, "ordinary staff edits enforce linked identity semantics");
+    assert.equal(db.prepare("SELECT email FROM staff WHERE id = 2").get()?.email, "renamed@example.test");
+  }
+  assert.equal(listing.body.staff.find((s: any) => s.id === 2).access_enabled, 1);
+  assert.ok(!JSON.stringify(listing.body).includes("password_hash"));
+  const publicListing = await request("GET", "/api/public/acme/overview");
+  assert.equal(publicListing.status, 200);
+  assert.ok(!JSON.stringify(publicListing.body).includes("access_enabled"));
+  assert.ok(!JSON.stringify(publicListing.body).includes("password_hash"));
+  assert.equal((await save({ active: 0 })).status, 200);
+  assert.equal((await login("renamed@example.test", "fictional replacement password")).status, 403);
+  assert.equal((await save({ professional_password: "fictional inactive reset" })).status, 400);
+  db.exec("UPDATE staff SET active = 1 WHERE id = 2; UPDATE companies SET status = 'disabled' WHERE id = 1");
+  assert.equal((await login("renamed@example.test", "fictional replacement password")).status, 403);
+  assert.equal((await save({ professional_password: "fictional inactive reset" })).status, 403);
+});
+
+test("new access rejects collisions without converting accounts and blank password never links by email", async (t) => {
+  const { db, request } = await professionalFixture(t);
+  db.exec("INSERT INTO users (id, email, password_hash, role, company_id) VALUES (4, 'cross@example.test', 'test', 'tenant', 2); INSERT INTO professional_accounts VALUES (4, 2, 3)");
+  const owner = await signToken(secret, 2, 0);
+  const headers = { cookie: `__Host-youturno=${owner.jwt}`, "x-csrf-token": owner.csrf };
+  const before = db.prepare("SELECT * FROM users ORDER BY id").all();
+  for (const email of ["owner@example.test", "PLATFORM@example.test", "professional@example.test", "cross@example.test"]) {
+    assert.equal((await request("PUT", "/api/staff/2", { headers, body: { name: "Rejected", email, professional_password: "fictional collision password" } })).status, 409);
+    assert.deepEqual(db.prepare("SELECT * FROM users ORDER BY id").all(), before);
+    assert.equal(db.prepare("SELECT name FROM staff WHERE id = 2").get()?.name, "Ben");
+  }
+  assert.equal((await request("PUT", "/api/staff/2", { headers, body: { email: "owner@example.test", professional_password: "" } })).status, 200);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_accounts WHERE staff_id = 2").get()?.n, 0);
+  assert.deepEqual(db.prepare("SELECT * FROM users ORDER BY id").all(), before);
+  assert.equal((await request("PUT", "/api/staff/2", { headers, body: { professional_password: "fictional collision password", role: "tenant" } })).status, 400);
+});
+
+test("access batches reject duplicate provisioning, stale authority and roll back staff or credential failures", async (t) => {
+  const { db, request, beforeNextBatch, synchronizeBatches } = await professionalFixture(t);
+  const owner = await signToken(secret, 2, 0);
+  const headers = { cookie: `__Host-youturno=${owner.jwt}`, "x-csrf-token": owner.csrf };
+  const save = (body: unknown) => request("PUT", "/api/staff/2", { headers, body });
+  for (const [change, restore] of [
+    ["UPDATE staff SET active = 0 WHERE id = 2", "UPDATE staff SET active = 1 WHERE id = 2"],
+    ["UPDATE companies SET status = 'disabled' WHERE id = 1", "UPDATE companies SET status = 'active' WHERE id = 1"],
+    ["UPDATE users SET session_version = 1 WHERE id = 2", "UPDATE users SET session_version = 0 WHERE id = 2"],
+    ["DELETE FROM tenant_ownership WHERE resource_type = 'staff' AND resource_id = 2", "INSERT INTO tenant_ownership VALUES ('staff', 2, 1)"],
+  ]) {
+    beforeNextBatch(() => db.exec(change));
+    assert.equal((await save({ name: "Rejected", email: "atomic@example.test", professional_password: "fictional atomic password" })).status, 409);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM users WHERE email = 'atomic@example.test'").get()?.n, 0);
+    assert.equal(db.prepare("SELECT name FROM staff WHERE id = 2").get()?.name, "Ben");
+    db.exec(restore);
+  }
+  db.exec("CREATE TRIGGER fail_staff_edit BEFORE UPDATE ON staff WHEN NEW.id = 2 BEGIN SELECT RAISE(ABORT, 'isolated failure'); END");
+  assert.equal((await save({ name: "Rejected", email: "atomic@example.test", professional_password: "fictional atomic password" })).status, 409);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM users WHERE email = 'atomic@example.test'").get()?.n, 0);
+  db.exec("DROP TRIGGER fail_staff_edit");
+  synchronizeBatches(2);
+  const concurrent = await Promise.all([save({ email: "atomic@example.test", professional_password: "fictional atomic password" }),
+    save({ email: "other-atomic@example.test", professional_password: "fictional atomic password" })]);
+  assert.deepEqual(concurrent.map((r) => r.status).sort(), [200, 409]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_accounts WHERE staff_id = 2").get()?.n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM users WHERE email IN ('atomic@example.test', 'other-atomic@example.test')").get()?.n, 1);
+  const snapshot = db.prepare("SELECT password_hash, session_version FROM users WHERE id = (SELECT user_id FROM professional_accounts WHERE staff_id = 2)").get();
+  db.exec("CREATE TRIGGER fail_staff_edit BEFORE UPDATE ON staff WHEN NEW.id = 2 BEGIN SELECT RAISE(ABORT, 'isolated failure'); END");
+  assert.equal((await save({ name: "Rejected", professional_password: "fictional reset rollback" })).status, 409);
+  assert.deepEqual(db.prepare("SELECT password_hash, session_version FROM users WHERE id = (SELECT user_id FROM professional_accounts WHERE staff_id = 2)").get(), snapshot);
+  assert.equal(db.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("professional completion is not payment and cancellation requires manual contact, with terminal and duplicate actions denied", async (t) => {
+  const { db, request, action, headers, expected } = await professionalFixture(t);
+  assert.equal((await action({ action: "completed" }, 2)).status, 404);
+  assert.equal((await action({ action: "completed" }, 3)).status, 404);
+  assert.equal((await action({ action: "completed", staff_id: 2 })).status, 400);
+  assert.equal((await action({ action: "completed" }, 1, { "x-csrf-token": "" })).status, 403);
+  assert.equal((await action({ action: "cancelled" })).status, 400);
+  // Legacy corrupt times never block an unrelated finalization.
+  db.exec("UPDATE appointments SET start_time = 'legacy', end_time = 'legacy' WHERE id = 1");
+  const before = expected();
+  const complete = await action({ action: "completed" });
+  assert.equal(complete.status, 200); assert.equal(complete.body.manual_contact_required, false);
+  assert.equal(db.prepare("SELECT status FROM appointments WHERE id = 1").get()?.status, "completed");
+  assert.equal((await action({ action: "completed", expected: before })).status, 409);
+  assert.equal((await action({ action: "cancelled", manual_contact_acknowledged: true })).status, 409);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 1);
+  db.exec("UPDATE appointments SET status = 'confirmed' WHERE id = 1");
+  const cancel = await action({ action: "cancelled", manual_contact_acknowledged: true });
+  assert.equal(cancel.status, 200); assert.equal(cancel.body.manual_contact_required, true);
+  assert.match(cancel.body.message, /no se envió ningún mensaje/);
+  const detail = await request("GET", "/api/professional/appointments/1", { headers });
+  assert.equal(detail.body.appointment.status, "cancelled"); assert.equal(detail.body.appointment.client_phone, "+541155550100");
+  assert.equal(detail.body.appointment.history.length, 2);
+});
+
+test("professional reschedule preserves real duration, excludes itself and uses full hours not public cadence", async (t) => {
+  const { db, action, expected } = await professionalFixture(t);
+  db.exec("UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1");
+  const old = expected();
+  const moved = await action({ action: "reschedule", date: MONDAY, start_time: "10:17", manual_contact_acknowledged: true });
+  assert.equal(moved.status, 200); assert.equal(moved.body.manual_contact_required, true);
+  assert.deepEqual(expected(), { ...old, start_time: "10:17", end_time: "11:17" });
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "12:00", expected: old, manual_contact_acknowledged: true })).status, 409);
+  assert.equal((await action({ action: "reschedule", date: SUNDAY, start_time: "12:00", manual_contact_acknowledged: true })).status, 409);
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "23:30", manual_contact_acknowledged: true })).status, 400);
+  assert.equal((await action({ action: "reschedule", date: "2037-02-30", start_time: "12:00", manual_contact_acknowledged: true })).status, 400);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 1);
+});
+
+test("legacy bookings without service links remain manageable but cannot be rescheduled by a professional", async (t) => {
+  const { db, action } = await professionalFixture(t);
+  db.exec("DELETE FROM appointment_services WHERE appointment_id = 1");
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "12:00", manual_contact_acknowledged: true })).status, 409);
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "12:00", manual_contact_acknowledged: true, allow_conflict: true })).status, 400);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 0);
+  assert.equal((await action({ action: "cancelled", manual_contact_acknowledged: true })).status, 200);
+});
+
+test("simultaneous duplicate completion creates exactly one terminal change and audit entry", async (t) => {
+  const { db, action, synchronizeBatches } = await professionalFixture(t);
+  synchronizeBatches(2);
+  const results = await Promise.all([action({ action: "completed" }), action({ action: "completed" })]);
+  assert.deepEqual(results.map((row) => row.status).sort(), [200, 409]);
+  assert.equal(db.prepare("SELECT status FROM appointments WHERE id = 1").get()?.status, "completed");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 1);
+});
+
+for (const change of ["busy", "block", "company hours", "staff hours", "qualification", "inactive", "company disabled", "revoked", "reassigned", "status", "duration"]) {
+  test(`professional reschedule atomically rechecks stale admission: ${change}`, async (t) => {
+    const { db, action, beforeNextBatch, expected } = await professionalFixture(t);
+    const old = expected();
+    beforeNextBatch(() => {
+      if (change === "busy") db.exec(`UPDATE appointments SET staff_id = 1 WHERE id = 2`);
+      if (change === "block") db.exec(`INSERT INTO blocked_slots (id, staff_id, blocked_date, start_time, end_time) VALUES (1, 1, '${MONDAY}', '12:00', '13:00'); INSERT INTO tenant_ownership VALUES ('blocked_slots', 1, 1);`);
+      if (change === "company hours") db.exec(`UPDATE companies SET business_hours = '{"mon":[["09:00","11:00"],["13:00","18:00"]]}' WHERE id = 1`);
+      if (change === "staff hours") db.exec(`UPDATE staff SET working_hours = '{"mon":[]}' WHERE id = 1`);
+      if (change === "qualification") db.exec("DELETE FROM staff_services WHERE staff_id = 1");
+      if (change === "inactive") db.exec("UPDATE staff SET active = 0 WHERE id = 1");
+      if (change === "company disabled") db.exec("UPDATE companies SET status = 'disabled' WHERE id = 1");
+      if (change === "revoked") db.exec("UPDATE users SET session_version = 1 WHERE id = 1");
+      if (change === "reassigned") db.exec("UPDATE appointments SET staff_id = 2 WHERE id = 1");
+      if (change === "status") db.exec("UPDATE appointments SET status = 'completed' WHERE id = 1");
+      if (change === "duration") db.exec("UPDATE appointments SET end_time = '11:30' WHERE id = 1");
+    });
+    assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "12:00", manual_contact_acknowledged: true })).status, 409);
+    assert.deepEqual(expected(), { ...old, ...(change === "status" ? { status: "completed" } : {}), ...(change === "duration" ? { end_time: "11:30" } : {}) });
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 0);
+  });
+}
+
+test("competing professional reschedules admit only one and alert cursors do not replay initial bookings", async (t) => {
+  const { db, request, action, headers, synchronizeBatches } = await professionalFixture(t);
+  db.exec(`UPDATE appointments SET staff_id = 1 WHERE id = 2;
+    INSERT INTO appointment_services (id, appointment_id, service_id, duration, price) VALUES (2, 2, 1, 60, 40);
+    INSERT INTO tenant_ownership VALUES ('appointment_services', 2, 1);`);
+  const baseline = await request("GET", `/api/professional/agenda?date=${MONDAY}`, { headers });
+  assert.deepEqual(baseline.body.new_booking_ids, []);
+  const expected2 = { ...db.prepare("SELECT status, scheduled_date, start_time, end_time FROM appointments WHERE id = 2").get() };
+  synchronizeBatches(2);
+  const changes = await Promise.all([action({ action: "reschedule", date: MONDAY, start_time: "14:00", manual_contact_acknowledged: true }),
+    action({ action: "reschedule", expected: expected2, date: MONDAY, start_time: "14:00", manual_contact_acknowledged: true }, 2)]);
+  assert.deepEqual(changes.map((r) => r.status).sort(), [200, 409]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 1);
+  const booked = await request("POST", "/api/public/acme/book", { headers: { cookie: await bookingCookie() },
+    body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time: "16:00" } });
+  assert.equal(booked.status, 201);
+  const updates = await request("GET", `/api/professional/agenda?date=${MONDAY}&cursor=${baseline.body.cursor}`, { headers });
+  assert.deepEqual(updates.body.new_booking_ids, [booked.body.appointment.id]);
+  assert.deepEqual((await request("GET", `/api/professional/agenda?date=${MONDAY}&cursor=${updates.body.cursor}`, { headers })).body.new_booking_ids, []);
+});
+
 test("staff scheduling settings default, validate, preserve omissions and resist mass assignment", async (t) => {
   const { db, request } = await twoCompanies(t);
   db.exec("INSERT INTO users (email, password_hash, role, company_id) VALUES ('owner@example.test', 'test', 'tenant', 1)");
@@ -175,7 +527,7 @@ test("any-professional slots union each policy and assign only a professional ac
   assert.deepEqual(await slots(), ["09:10", "09:40", "10:10", "16:10", "16:40", "17:10"]);
   const cookie = await bookingCookie();
   const book = (start_time: string, staff_id?: number) => request("POST", "/api/public/acme/book", {
-    headers: { cookie }, body: { service_id: 1, date: MONDAY, start_time, ...(staff_id ? { staff_id } : {}) } });
+    headers: { cookie }, body: { contact_phone: "+54 11 5555-0100", service_id: 1, date: MONDAY, start_time, ...(staff_id ? { staff_id } : {}) } });
   assert.equal((await book("09:40", 1)).status, 409);
   assert.equal((await book("09:27")).status, 409);
   assert.equal((await book("25:00")).status, 400);
@@ -202,7 +554,7 @@ for (const change of ["mode", "cadence", "earliest", "duration"]) {
       if (change === "duration") db.exec("UPDATE services SET duration = 45 WHERE id = 1");
     });
     const result = await request("POST", "/api/public/acme/book", { headers: { cookie: await bookingCookie() },
-      body: { service_id: 1, staff_id: 1, date: MONDAY, start_time } });
+      body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time } });
     assert.equal(result.status, 409);
     assert.equal(metrics.admissionConflicts, 1);
     assert.equal(db.prepare("SELECT count(*) AS n FROM appointments").get()?.n, 0);
@@ -216,7 +568,7 @@ test("consecutive contention admits only one customer and advances to the exact 
   db.exec("UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1; UPDATE services SET duration = 45 WHERE id = 1");
   synchronizeBatches(2);
   const results = await Promise.all(["one", "two"].map(async (name) => request("POST", "/api/public/acme/book", {
-    headers: { cookie: await bookingCookie(`${name}@example.test`) }, body: { service_id: 1, staff_id: 1, date: MONDAY, start_time: "09:00" } })));
+    headers: { cookie: await bookingCookie(`${name}@example.test`) }, body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time: "09:00" } })));
   assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
   assert.equal(metrics.admissionConflicts, 1);
   assert.deepEqual((await request("GET", `/api/public/acme/slots?date=${MONDAY}&service_id=1&staff_id=1`)).body.slots, ["09:45"]);
@@ -358,14 +710,14 @@ test("customer session routes guard identity", async (t) => {
 test("public booking creates a confirmed appointment, one client per customer and honest 409s", async (t) => {
   const { db, request } = await twoCompanies(t);
   const cookie = await bookingCookie();
-  const book = (body: unknown, headers: Record<string, string> = { cookie }) =>
-    request("POST", "/api/public/acme/book", { body, headers });
+  const book = (body: Record<string, unknown>, headers: Record<string, string> = { cookie }) =>
+    request("POST", "/api/public/acme/book", { body: { contact_phone: "+541155550100", ...body }, headers });
   const unauthenticated = { body: { service_id: 1, date: MONDAY, start_time: "10:00" }, headers: {} };
 
   assert.equal((await request("POST", "/api/public/acme/book", unauthenticated)).status, 401,
     "an unsigned browser cannot book");
   assert.equal((await request("POST", "/api/public/unknown/book", {
-    body: { service_id: 1, date: MONDAY, start_time: "10:00" },
+    body: { contact_phone: "+541155550100", service_id: 1, date: MONDAY, start_time: "10:00" },
     headers: { cookie: await bookingCookie() },
   })).status, 404);
 
@@ -488,7 +840,7 @@ test("a configured Google flow redirects, binds the state cookie and opens a cus
     assert.deepEqual((await request("GET", "/api/auth/customer/session", { headers: { cookie } })).body,
       { customer: { sub: "google-1", email: "client@example.test", name: "Client Name" } });
     const book = await request("POST", "/api/public/acme/book",
-      { body: { service_id: 1, date: MONDAY, start_time: "09:00" }, headers: { cookie } });
+      { body: { contact_phone: "+541155550100", service_id: 1, date: MONDAY, start_time: "09:00" }, headers: { cookie } });
     assert.equal(book.status, 201);
     assert.equal(book.body.appointment.status, "confirmed");
 
@@ -527,7 +879,7 @@ test("competing public bookings are admitted atomically without orphan clients o
   const cookies = await Promise.all([bookingCookie("first@example.test"), bookingCookie("second@example.test")]);
   synchronizeBatches(2);
   const responses = await Promise.all(cookies.map((cookie) => request("POST", "/api/public/acme/book", {
-    headers: { cookie }, body: { service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00" },
+    headers: { cookie }, body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00" },
   })));
   assert.deepEqual(responses.map((response) => response.status).sort(), [201, 409]);
   assert.equal(metrics.admissionConflicts, 1, "the loser passed the stale HTTP availability read and was rejected inside the write transaction");
@@ -542,7 +894,7 @@ test("competing public bookings are admitted atomically without orphan clients o
 test("dates, duration and mutation origins are validated without private data exposure", async (t) => {
   const { db, request } = await twoCompanies(t);
   const cookie = await bookingCookie();
-  const body = { service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00" };
+  const body = { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00" };
   for (const date of ["2026-02-30", "2020-01-01"]) {
     assert.equal((await request("POST", "/api/public/acme/book", { body: { ...body, date }, headers: { cookie } })).status, 400);
     assert.equal((await request("GET", `/api/public/acme/slots?date=${date}&service_id=1`)).status, 400);
@@ -611,12 +963,12 @@ test("split hours and personal overrides share slot and booking admission rules"
   const cookie = await bookingCookie();
   for (const time of ["12:30", "13:00", "15:30"]) {
     assert.equal((await request("POST", "/api/public/acme/book", { headers: { cookie },
-      body: { service_id: 1, date: MONDAY, start_time: time } })).status, 409, time);
+      body: { contact_phone: "+541155550100", service_id: 1, date: MONDAY, start_time: time } })).status, 409, time);
   }
   assert.equal((await request("POST", "/api/public/acme/book", { headers: { cookie },
-    body: { service_id: 1, date: MONDAY, start_time: "16:00", staff_id: 1 } })).status, 409);
+    body: { contact_phone: "+541155550100", service_id: 1, date: MONDAY, start_time: "16:00", staff_id: 1 } })).status, 409);
   const booked = await request("POST", "/api/public/acme/book", { headers: { cookie },
-    body: { service_id: 1, date: MONDAY, start_time: "16:00" } });
+    body: { contact_phone: "+541155550100", service_id: 1, date: MONDAY, start_time: "16:00" } });
   assert.equal(booked.status, 201);
   assert.equal(db.prepare("SELECT staff_id FROM appointments WHERE id = ?").get(booked.body.appointment.id)?.staff_id, 2);
   // Personal intervals cannot expand company hours, nor bridge its midday gap.
@@ -671,11 +1023,11 @@ test("explicit staff overrides admit only services wholly inside a company/perso
   const cookie = await bookingCookie();
   for (const start_time of ["08:00", "11:30", "12:00", "16:00", "19:30", "20:00"]) {
     assert.equal((await request("POST", "/api/public/acme/book", { headers: { cookie },
-      body: { service_id: 1, staff_id: 1, date: MONDAY, start_time } })).status, 409, start_time);
+      body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time } })).status, 409, start_time);
   }
   for (const start_time of ["11:00", "17:00", "19:00"]) {
     assert.equal((await request("POST", "/api/public/acme/book", { headers: { cookie },
-      body: { service_id: 1, staff_id: 1, date: MONDAY, start_time } })).status, 201, start_time);
+      body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time } })).status, 201, start_time);
   }
 });
 
@@ -693,7 +1045,7 @@ for (const change of ["company closes", "company splits", "staff closes", "staff
       if (change === "service deactivates") db.exec("UPDATE services SET active = 0 WHERE id = 1");
     });
     const booked = await request("POST", "/api/public/acme/book", { headers: { cookie },
-      body: { service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00" } });
+      body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00" } });
     assert.equal(booked.status, 409);
     assert.equal(metrics.admissionConflicts, 1);
     for (const table of ["appointments", "clients", "appointment_services", "public_booking_admission"]) {
@@ -711,7 +1063,7 @@ test("unconfigured legacy staff fail closed and any-staff slots and booking use 
   assert.deepEqual((await slots()).body, { slots: [], any: true });
   const cookie = await bookingCookie();
   const book = (staff_id?: number) => request("POST", "/api/public/acme/book", { headers: { cookie },
-    body: { service_id: 1, date: MONDAY, start_time: "10:00", ...(staff_id === undefined ? {} : { staff_id }) } });
+    body: { contact_phone: "+541155550100", service_id: 1, date: MONDAY, start_time: "10:00", ...(staff_id === undefined ? {} : { staff_id }) } });
   assert.equal((await book()).status, 409);
   assert.equal((await book(1)).status, 400);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM clients").get()?.n, 0);

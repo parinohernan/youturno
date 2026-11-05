@@ -52,6 +52,7 @@ function main() {
     console.log("Additive schema includes empty staff_services and current-qualification admission guard; no assignments are backfilled.");
     console.log("Additive schema also creates company_booking_appearance (settings and optional cover BLOB); no company designs are populated. Existing rows use defaults.");
     console.log("Staff scheduling defaults to fixed/30; current policy admission guard is installed without moving appointments or changing existing settings.");
+    console.log("Professional access adds empty professional_accounts and professional_appointment_changes tables plus atomic action guards; users and their role CHECK are not rebuilt, and no accounts or restrictions are created.");
     console.log("Preview only. To apply: pnpm migrate:local --apply --backup /absolute/path/to/new-backup.sql (stop the dev server first).");
     return;
   }

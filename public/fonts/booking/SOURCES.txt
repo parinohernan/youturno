@@ -1,0 +1,15 @@
+Booking typography (self-hosted; no runtime third-party font requests)
+
+Fraunces Regular, Latin subset, 17,968 bytes
+Source: https://cdn.jsdelivr.net/npm/@fontsource/fraunces@5.2.8/files/fraunces-latin-400-normal.woff2
+License: fraunces-OFL.txt (SIL Open Font License 1.1)
+
+DM Sans Regular, Latin subset, 14,200 bytes
+Source: https://cdn.jsdelivr.net/npm/@fontsource/dm-sans@5.2.8/files/dm-sans-latin-400-normal.woff2
+License: dm-sans-OFL.txt (SIL Open Font License 1.1)
+
+Upstream: https://github.com/google/fonts
+Only normal weight 400 is shipped. Browser-synthesized emphasis is intentional
+to keep the combined font payload at 32,168 bytes. Latin covers Spanish UI.
+Fallbacks: Palatino-family serif headings and Trebuchet MS body, then the
+corresponding generic family. No tenant or platform typography is changed.

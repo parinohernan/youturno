@@ -195,6 +195,28 @@ CREATE TABLE IF NOT EXISTS users (
   CHECK ((role = 'superadmin' AND company_id IS NULL) OR role = 'tenant')
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_superadmin ON users(role) WHERE role = 'superadmin';
+-- A sidecar restricts an existing tenant identity without rebuilding users' role
+-- CHECK. A deleted staff member leaves the restriction intact (NULL => denied).
+CREATE TABLE IF NOT EXISTS professional_accounts (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+  staff_id INTEGER UNIQUE REFERENCES staff(id) ON DELETE SET NULL
+);
+CREATE TRIGGER IF NOT EXISTS check_professional_account_insert BEFORE INSERT ON professional_accounts
+BEGIN
+  SELECT RAISE(ABORT, 'invalid professional binding') WHERE NOT EXISTS (
+    SELECT 1 FROM users u JOIN tenant_ownership o ON o.company_id = u.company_id
+      AND o.resource_type = 'staff' AND o.resource_id = NEW.staff_id
+    WHERE u.id = NEW.user_id AND u.role = 'tenant' AND u.company_id = NEW.company_id);
+END;
+CREATE TRIGGER IF NOT EXISTS check_professional_account_update BEFORE UPDATE ON professional_accounts
+WHEN NEW.staff_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'invalid professional binding') WHERE NOT EXISTS (
+    SELECT 1 FROM users u JOIN tenant_ownership o ON o.company_id = u.company_id
+      AND o.resource_type = 'staff' AND o.resource_id = NEW.staff_id
+    WHERE u.id = NEW.user_id AND u.role = 'tenant' AND u.company_id = NEW.company_id);
+END;
 CREATE TABLE IF NOT EXISTS company_onboarding (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE RESTRICT,
   company_id INTEGER NOT NULL UNIQUE REFERENCES companies(id) ON DELETE RESTRICT
@@ -227,6 +249,98 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   failures INTEGER NOT NULL DEFAULT 0,
   locked_until INTEGER NOT NULL DEFAULT 0
 );
+-- Immutable action history and its updates commit together. This guard is
+-- separate from public cadence and does not change administrators' override policy.
+CREATE TABLE IF NOT EXISTS professional_appointment_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_id INTEGER NOT NULL REFERENCES users(id),
+  session_version INTEGER NOT NULL,
+  appointment_id INTEGER NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  action TEXT NOT NULL CHECK (action IN ('completed', 'cancelled', 'reschedule')),
+  old_status TEXT NOT NULL,
+  old_date TEXT NOT NULL,
+  old_start TEXT NOT NULL,
+  old_end TEXT NOT NULL,
+  new_date TEXT NOT NULL,
+  new_start TEXT NOT NULL,
+  new_end TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TRIGGER IF NOT EXISTS admit_professional_change BEFORE INSERT ON professional_appointment_changes
+BEGIN
+  SELECT RAISE(ABORT, 'professional change conflict') WHERE NOT EXISTS (
+    SELECT 1 FROM appointments a
+    JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+    JOIN professional_accounts pa ON pa.staff_id = a.staff_id AND pa.company_id = o.company_id
+    JOIN users u ON u.id = pa.user_id AND u.company_id = pa.company_id AND u.role = 'tenant'
+    JOIN companies c ON c.id = pa.company_id AND c.status = 'active'
+    JOIN staff s ON s.id = pa.staff_id AND s.active = 1
+    JOIN tenant_ownership so ON so.resource_type = 'staff' AND so.resource_id = s.id AND so.company_id = c.id
+    WHERE a.id = NEW.appointment_id AND pa.user_id = NEW.actor_id AND u.session_version = NEW.session_version
+      AND a.status IN ('booked', 'confirmed', 'in_progress') AND a.status = NEW.old_status
+      AND a.scheduled_date = NEW.old_date AND a.start_time = NEW.old_start AND a.end_time = NEW.old_end);
+  SELECT RAISE(ABORT, 'professional change conflict') WHERE NEW.action != 'reschedule' AND
+    (NEW.new_date != NEW.old_date OR NEW.new_start != NEW.old_start OR NEW.new_end != NEW.old_end);
+END;
+CREATE TRIGGER IF NOT EXISTS admit_professional_reschedule BEFORE INSERT ON professional_appointment_changes
+WHEN NEW.action = 'reschedule'
+BEGIN
+  SELECT RAISE(ABORT, 'professional change conflict') WHERE
+    NEW.new_date != date(NEW.new_date, '+0 days') OR date(NEW.new_date, '+0 days') IS NULL
+    OR NEW.new_start NOT GLOB '[0-2][0-9]:[0-5][0-9]' OR NEW.new_start >= '24:00'
+    OR NEW.new_end NOT GLOB '[0-2][0-9]:[0-5][0-9]' OR NEW.new_end >= '24:00'
+    OR NEW.new_end <= NEW.new_start
+    OR julianday(NEW.new_date || ' ' || NEW.new_start) < julianday('now')
+    OR (strftime('%s', '2000-01-01 ' || NEW.new_end) - strftime('%s', '2000-01-01 ' || NEW.new_start)) !=
+       (strftime('%s', '2000-01-01 ' || NEW.old_end) - strftime('%s', '2000-01-01 ' || NEW.old_start));
+  SELECT RAISE(ABORT, 'professional change conflict') WHERE NOT EXISTS
+    (SELECT 1 FROM appointment_services WHERE appointment_id = NEW.appointment_id)
+    OR EXISTS (
+      SELECT 1 FROM appointment_services aps JOIN professional_accounts pa ON pa.user_id = NEW.actor_id
+      WHERE aps.appointment_id = NEW.appointment_id AND NOT EXISTS (
+        SELECT 1 FROM staff_services ss JOIN services sv ON sv.id = ss.service_id AND sv.active = 1
+        JOIN tenant_ownership so ON so.resource_type = 'services' AND so.resource_id = sv.id AND so.company_id = pa.company_id
+        JOIN tenant_ownership ao ON ao.resource_type = 'appointment_services' AND ao.resource_id = aps.id AND ao.company_id = pa.company_id
+        WHERE ss.company_id = pa.company_id AND ss.staff_id = pa.staff_id AND ss.service_id = aps.service_id));
+  SELECT RAISE(ABORT, 'professional change conflict') WHERE EXISTS (
+    SELECT 1 FROM appointments a JOIN professional_accounts pa ON pa.staff_id = a.staff_id
+    JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id AND o.company_id = pa.company_id
+    WHERE pa.user_id = NEW.actor_id AND a.id != NEW.appointment_id AND a.status != 'cancelled'
+      AND a.scheduled_date = NEW.new_date AND a.start_time < NEW.new_end AND a.end_time > NEW.new_start);
+  SELECT RAISE(ABORT, 'professional change conflict') WHERE EXISTS (
+    SELECT 1 FROM blocked_slots b JOIN professional_accounts pa ON pa.staff_id = b.staff_id
+    JOIN tenant_ownership o ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id AND o.company_id = pa.company_id
+    WHERE pa.user_id = NEW.actor_id AND b.blocked_date = NEW.new_date AND b.start_time < NEW.new_end AND b.end_time > NEW.new_start);
+  SELECT RAISE(ABORT, 'professional change conflict') WHERE NOT EXISTS (
+    WITH source AS (
+      SELECT CASE WHEN json_valid(c.business_hours) THEN c.business_hours ELSE '{}' END AS company_hours,
+        CASE WHEN json_valid(s.working_hours) THEN s.working_hours ELSE '{}' END AS personal_hours,
+        s.working_hours IS NULL OR (json_valid(s.working_hours) AND json_type(CASE WHEN json_valid(s.working_hours) THEN s.working_hours ELSE '{}' END) = 'object') AS valid_personal,
+        '$.' || CASE strftime('%w', NEW.new_date) WHEN '0' THEN 'sun' WHEN '1' THEN 'mon' WHEN '2' THEN 'tue'
+          WHEN '3' THEN 'wed' WHEN '4' THEN 'thu' WHEN '5' THEN 'fri' WHEN '6' THEN 'sat' END AS path
+      FROM professional_accounts pa JOIN companies c ON c.id = pa.company_id JOIN staff s ON s.id = pa.staff_id
+      WHERE pa.user_id = NEW.actor_id
+    ), days AS (
+      SELECT *, json_extract(company_hours, path) AS company_day,
+        CASE WHEN json_type(personal_hours, path) IS NULL THEN json_extract(company_hours, path)
+          ELSE json_extract(personal_hours, path) END AS personal_day FROM source
+    )
+    SELECT 1 FROM days,
+      json_each(CASE WHEN json_type(company_day, '$[0]') = 'text' THEN json_array(json(company_day)) ELSE company_day END) c,
+      json_each(CASE WHEN json_type(personal_day, '$[0]') = 'text' THEN json_array(json(personal_day)) ELSE personal_day END) p
+    WHERE valid_personal AND max(json_extract(c.value, '$[0]'), json_extract(p.value, '$[0]')) <= NEW.new_start
+      AND min(json_extract(c.value, '$[1]'), json_extract(p.value, '$[1]')) >= NEW.new_end);
+END;
+CREATE TRIGGER IF NOT EXISTS apply_professional_change AFTER INSERT ON professional_appointment_changes
+BEGIN
+  UPDATE appointments SET status = CASE WHEN NEW.action = 'reschedule' THEN status ELSE NEW.action END,
+    scheduled_date = NEW.new_date, start_time = NEW.new_start, end_time = NEW.new_end, updated_at = datetime('now')
+    WHERE id = NEW.appointment_id;
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_professional_change BEFORE UPDATE ON professional_appointment_changes
+BEGIN
+  SELECT RAISE(ABORT, 'professional history is immutable');
+END;
 -- An admission row is inserted and removed in the public booking D1 batch.
 -- The trigger sees the latest committed schedule, not an earlier HTTP read.
 -- Staff's explicit allow_conflict policy is intentionally unaffected.

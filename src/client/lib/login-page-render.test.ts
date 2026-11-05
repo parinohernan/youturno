@@ -78,6 +78,12 @@ test("platform login preserves semantics, branding, legal access and the auth su
     await submit({ preventDefault() {}, currentTarget: {} });
     assert.equal(requests.length, 3, "A rejected login must not refresh the session");
     assert.deepEqual(globals.__loginRender.updates.at(-1), [2, "Mock rejection"]);
+    globals.window.location.pathname = "/profesionales/login";
+    render();
+    assert.equal(nodes.find(n => n.type === "h1").props.children, "Portal del profesional");
+    assert.ok(nodes.some(n => n.type === "a" && n.props.href === "/"));
+    await nodes.find(n => n.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
+    assert.equal(JSON.parse(requests.at(-1)[1].body).professional_portal, true);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete globals[key]; else globals[key] = value;

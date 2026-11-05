@@ -74,7 +74,7 @@ test("legal routes render anonymously without session effects or API calls, with
     assert.match(render("/", { 1: false }), /Ingresar a Youturno/);
     assertLegalLinks();
     const overview = { google_sign_in: true, company: { name: "Agenda pública" }, services: [], staff: [] };
-    assert.match(render("/book/agenda-publica", { 0: "ready", 1: overview }), /Agenda pública/);
+    assert.match(render("/book/agenda-publica", { 0: "ready", 1: overview, 9: true }), /Agenda pública/);
     assertLegalLinks();
   } finally {
     for (const [key, value] of Object.entries({ window: previous.window, document: previous.document, fetch: previous.fetch, __legalRender: previous.state })) {

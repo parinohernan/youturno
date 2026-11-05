@@ -1,6 +1,7 @@
 import { createApp, createRoute, z } from "@clawnify/app";
 import { query, get, run } from "./db.js";
 import { safeSocialUrl } from "../shared/social-links.js";
+import { contactPhone } from "../shared/contact-phone.js";
 import { boundedBody, BodyTooLarge, MAX_LOGO_BYTES, validLogo } from "./company-logo.js";
 import { appearanceError, readAppearance, isColor } from "../shared/booking-appearance.js";
 import { findConflicts, describeConflicts, toMinutes, publicStarts, bookingFloor, minutesToTime, parseBusinessHours, windowsOnDate, effectiveWindows, effectiveWeeklyHours, fitsWindows, normalizeHours, type Busy, type SchedulingPolicy } from "./scheduling.js";
@@ -9,7 +10,8 @@ import { COOKIE, CUSTOMER_COOKIE, CUSTOMER_STATE_COOKIE, CUSTOMER_SECONDS, hashP
   signToken, verifyToken, signCustomerToken, verifyCustomerToken, signCustomerState, verifyCustomerState, randomNonce,
   safeEqual, type Token, type CustomerClaims } from "./auth.js";
 
-type Actor = { id: number; email: string; role: "superadmin" | "tenant"; company_id: number | null; session_version: number; company_name: string | null; company_status: string | null };
+type Actor = { id: number; email: string; role: "superadmin" | "tenant" | "professional"; company_id: number | null; session_version: number; company_name: string | null; company_status: string | null;
+  professional_user_id: number | null; staff_id: number | null; binding_company_id: number | null; staff_active: number | null; staff_owned: number | null };
 type D1Statement = { bind(...values: (number | string | null | Uint8Array)[]): D1Statement };
 type D1Database = { prepare(sql: string): D1Statement; batch(statements: D1Statement[]): Promise<{ meta: { changes: number } }[]> };
 type Env = { Bindings: { DB: D1Database; AUTH_SECRET: string; APP_ORIGIN?: string; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string }; Variables: { actor: Actor; claims: Token; customer: CustomerClaims } };
@@ -55,14 +57,31 @@ app.use("/api/*", async (c, next) => {
   const claims = jwt ? await verifyToken(c.env.AUTH_SECRET, jwt) : null;
   if (!claims) return c.json({ error: "Iniciá sesión" }, 401);
   const actor = await get<Actor>(`SELECT u.id, u.email, u.role, u.company_id, u.session_version,
+    pa.user_id AS professional_user_id, pa.staff_id, pa.company_id AS binding_company_id, s.active AS staff_active,
+    so.company_id AS staff_owned,
     co.name AS company_name, co.status AS company_status FROM users u
+    LEFT JOIN professional_accounts pa ON pa.user_id = u.id
+    LEFT JOIN staff s ON s.id = pa.staff_id
+    LEFT JOIN tenant_ownership so ON so.resource_type = 'staff' AND so.resource_id = pa.staff_id
     LEFT JOIN companies co ON co.id = u.company_id WHERE u.id = ?`, [claims.sub]);
   if (!actor || actor.session_version !== claims.sv ||
     (actor.role === "tenant" && actor.company_id !== null && !actor.company_status)) return c.json({ error: "Sesión no válida" }, 401);
+  if (actor.professional_user_id !== null) {
+    if (actor.role !== "tenant" || actor.company_status !== "active" || actor.staff_active !== 1 ||
+      actor.company_id !== actor.binding_company_id || actor.company_id !== actor.staff_owned || !actor.staff_id) {
+      return c.json({ error: "Acceso profesional no disponible" }, 403);
+    }
+    actor.role = "professional";
+  }
   c.set("actor", actor);
   c.set("claims", claims);
   if (mutation && !safeEqual(c.req.header("x-csrf-token") || "", claims.csrf)) return c.json({ error: "Token de seguridad inválido" }, 403);
-  if (path.startsWith("/api/auth/")) return next();
+  if (path === "/api/auth/session" || path === "/api/auth/logout") return next();
+  if (actor.role === "professional") {
+    if (!path.startsWith("/api/professional/")) return c.json({ error: "Acceso denegado" }, 403);
+    return next();
+  }
+  if (path.startsWith("/api/professional/")) return c.json({ error: "Acceso denegado" }, 403);
   if (path.startsWith("/api/admin/")) {
     if (actor.role !== "superadmin") return c.json({ error: "Acceso denegado" }, 403);
     return next();
@@ -75,7 +94,7 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-const credentials = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(1024) });
+const credentials = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(1024), professional_portal: z.boolean().optional() });
 const userInput = z.object({ email: z.string().email().max(254), password: z.string().min(12).max(1024) });
 
 app.post("/api/auth/login", async (c) => {
@@ -94,6 +113,13 @@ app.post("/api/auth/login", async (c) => {
       [email, failures, failures >= 5 ? now + 900 : 0]);
     return c.json({ error: "Credenciales inválidas" }, 401);
   }
+  const binding = await get<{ company_id: number; staff_id: number | null; active: number | null; status: string; owned: number | null }>(`SELECT pa.company_id, pa.staff_id, s.active, co.status, o.company_id AS owned
+    FROM professional_accounts pa JOIN companies co ON co.id = pa.company_id
+    LEFT JOIN staff s ON s.id = pa.staff_id LEFT JOIN tenant_ownership o ON o.resource_type = 'staff' AND o.resource_id = pa.staff_id
+    WHERE pa.user_id = ?`, [user.id]);
+  if (binding && (user.role !== "tenant" || user.company_id !== binding.company_id || binding.owned !== binding.company_id ||
+    binding.active !== 1 || binding.status !== "active" || !binding.staff_id)) return c.json({ error: "Acceso profesional no disponible" }, 403);
+  if (parsed.data.professional_portal && !binding) return c.json({ error: "Esta cuenta no tiene acceso al portal profesional. Use el ingreso de administración." }, 403);
   await run("DELETE FROM login_attempts WHERE email = ?", [email]);
   const { jwt, csrf } = await signToken(c.env.AUTH_SECRET, user.id, user.session_version);
   setCookie(c, COOKIE, jwt, { httpOnly: true, secure: true, sameSite: "Strict", path: "/", maxAge: 8 * 60 * 60 });
@@ -103,6 +129,7 @@ app.post("/api/auth/login", async (c) => {
 app.get("/api/auth/session", (c) => {
   const actor = c.get("actor");
   return c.json({ email: actor.email, role: actor.role, company_id: actor.company_id,
+    staff_id: actor.role === "professional" ? actor.staff_id : null,
     company_name: actor.company_name, company_status: actor.company_status, csrf: c.get("claims").csrf });
 });
 
@@ -110,6 +137,119 @@ app.post("/api/auth/logout", async (c) => {
   await run("UPDATE users SET session_version = session_version + 1 WHERE id = ?", [c.get("actor").id]);
   deleteCookie(c, COOKIE, { secure: true, path: "/" });
   return c.json({ ok: true });
+});
+
+// Dedicated professional routes never reuse tenant-wide data loaders.
+const professionalProjection = `SELECT a.id, a.identifier, a.staff_id, a.status, a.scheduled_date, a.start_time, a.end_time,
+  a.notes, a.total_price, a.updated_at, cl.name AS client_name, cl.phone AS client_phone, cl.email AS client_email
+  FROM appointments a JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+  LEFT JOIN clients cl ON cl.id = a.client_id AND EXISTS (SELECT 1 FROM tenant_ownership co
+    WHERE co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = o.company_id)`;
+const validDay = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+  Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+
+app.get("/api/professional/agenda", async (c) => {
+  const actor = c.get("actor");
+  const date = c.req.query("date") ?? new Date().toISOString().slice(0, 10);
+  const cursor = c.req.query("cursor");
+  if (!validDay(date) || (cursor !== undefined && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor))))) {
+    return c.json({ error: "Fecha o actualización inválida" }, 400);
+  }
+  const appointments = await query(`${professionalProjection}
+    WHERE o.company_id = ? AND a.staff_id = ? AND a.scheduled_date = ? ORDER BY a.start_time, a.id`,
+    [actor.company_id, actor.staff_id, date]);
+  const upcoming = await query(`${professionalProjection}
+    WHERE o.company_id = ? AND a.staff_id = ? AND a.status IN ('booked', 'confirmed', 'in_progress')
+      AND a.scheduled_date >= date('now') AND a.scheduled_date <= date('now', '+90 days')
+      AND (a.scheduled_date > date('now') OR a.end_time >= time('now'))
+    ORDER BY a.scheduled_date, a.start_time, a.id LIMIT 100`, [actor.company_id, actor.staff_id]);
+  const latest = await get<{ cursor: number }>(`SELECT COALESCE(MAX(a.id), 0) AS cursor FROM appointments a
+    JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+    WHERE o.company_id = ? AND a.staff_id = ?`, [actor.company_id, actor.staff_id]);
+  const nextCursor = Math.max(latest?.cursor ?? 0, Number(cursor ?? 0));
+  const alerts = cursor === undefined ? [] : await query<{ id: number }>(`SELECT a.id FROM appointments a
+    JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+    WHERE o.company_id = ? AND a.staff_id = ? AND a.id > ? AND a.id <= ?`,
+    [actor.company_id, actor.staff_id, Number(cursor), nextCursor]);
+  const member = await get<{ name: string; working_hours: string | null; business_hours: string }>(`SELECT s.name, s.working_hours, co.business_hours
+    FROM staff s JOIN companies co ON co.id = ? WHERE s.id = ?`, [actor.company_id, actor.staff_id]);
+  return c.json({ appointments, upcoming, cursor: nextCursor, new_booking_ids: alerts.map((row) => row.id),
+    staff: member ? { name: member.name, effective_hours: Object.fromEntries(Object.entries(
+      effectiveWeeklyHours(parseBusinessHours(member.business_hours), member.working_hours)).map(([day, windows]) =>
+      [day, windows.map((window) => [minutesToTime(window.start), minutesToTime(window.end)])])) } : null });
+});
+
+app.get("/api/professional/appointments/:id", async (c) => {
+  const actor = c.get("actor");
+  const id = Number(c.req.param("id"));
+  if (!Number.isSafeInteger(id) || id < 1) return c.json({ error: "No encontrado" }, 404);
+  const appointment = await get<Record<string, unknown>>(`${professionalProjection}
+    WHERE a.id = ? AND o.company_id = ? AND a.staff_id = ?`, [id, actor.company_id, actor.staff_id]);
+  if (!appointment) return c.json({ error: "No encontrado" }, 404);
+  const services = await query(`SELECT aps.duration, aps.price, sv.name AS service_name FROM appointment_services aps
+    JOIN tenant_ownership o ON o.resource_type = 'appointment_services' AND o.resource_id = aps.id AND o.company_id = ?
+    LEFT JOIN services sv ON sv.id = aps.service_id AND EXISTS (SELECT 1 FROM tenant_ownership so
+      WHERE so.resource_type = 'services' AND so.resource_id = sv.id AND so.company_id = o.company_id)
+    WHERE aps.appointment_id = ? AND EXISTS (SELECT 1 FROM appointments a WHERE a.id = aps.appointment_id AND a.staff_id = ?)`,
+    [actor.company_id, id, actor.staff_id]);
+  const history = await query(`SELECT action, old_status, old_date, old_start, old_end, new_date, new_start, new_end, created_at
+    FROM professional_appointment_changes h WHERE h.appointment_id = ? AND EXISTS (
+      SELECT 1 FROM appointments a JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+      WHERE a.id = h.appointment_id AND a.staff_id = ? AND o.company_id = ?) ORDER BY h.id DESC`, [id, actor.staff_id, actor.company_id]);
+  const notes = await query(`SELECT n.content, n.created_at FROM appointment_notes n JOIN tenant_ownership o
+    ON o.resource_type = 'appointment_notes' AND o.resource_id = n.id AND o.company_id = ?
+    WHERE n.appointment_id = ? AND EXISTS (SELECT 1 FROM appointments a WHERE a.id = n.appointment_id AND a.staff_id = ?)
+    ORDER BY n.id DESC`, [actor.company_id, id, actor.staff_id]);
+  return c.json({ appointment: { ...appointment, services, history, notes_history: notes } });
+});
+
+const professionalAction = z.object({
+  action: z.enum(["completed", "cancelled", "reschedule"]),
+  expected: z.object({ status: z.string(), scheduled_date: z.string(), start_time: z.string(), end_time: z.string() }).strict(),
+  date: z.string().optional(), start_time: z.string().optional(),
+  manual_contact_acknowledged: z.boolean().optional(),
+}).strict();
+app.post("/api/professional/appointments/:id/actions", async (c) => {
+  const actor = c.get("actor");
+  const id = Number(c.req.param("id"));
+  if (!Number.isSafeInteger(id) || id < 1) return c.json({ error: "No encontrado" }, 404);
+  const existing = await get<{ status: string; scheduled_date: string; start_time: string; end_time: string }>(
+    `SELECT a.status, a.scheduled_date, a.start_time, a.end_time FROM appointments a
+      JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id
+      WHERE a.id = ? AND o.company_id = ? AND a.staff_id = ?`, [id, actor.company_id, actor.staff_id]);
+  if (!existing) return c.json({ error: "No encontrado" }, 404);
+  const parsed = professionalAction.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "Acción inválida" }, 400);
+  const body = parsed.data;
+  if (body.action !== "completed" && body.manual_contact_acknowledged !== true) {
+    return c.json({ error: "Debe coordinar y notificar el cambio al cliente fuera de la aplicación" }, 400);
+  }
+  if (Object.entries(body.expected).some(([key, value]) => existing[key as keyof typeof existing] !== value)) {
+    return c.json({ error: "El turno cambió. Actualice los datos antes de continuar." }, 409);
+  }
+  let date = existing.scheduled_date, start = existing.start_time, end = existing.end_time;
+  if (body.action === "reschedule") {
+    const minutes = toMinutes(body.start_time ?? "");
+    const oldStart = toMinutes(start), oldEnd = toMinutes(end);
+    if (!body.date || !validDay(body.date) || minutes === null || oldStart === null || oldEnd === null || oldEnd <= oldStart ||
+      minutes + oldEnd - oldStart >= 1440 || !futureBooking(body.date, body.start_time!)) {
+      return c.json({ error: "Fecha, horario o duración inválidos" }, 400);
+    }
+    date = body.date; start = body.start_time!; end = addMinutes(start, oldEnd - oldStart);
+    if (date === existing.scheduled_date && start === existing.start_time) return c.json({ error: "Seleccione un horario diferente" }, 400);
+  } else if (body.date !== undefined || body.start_time !== undefined) return c.json({ error: "Acción inválida" }, 400);
+  try {
+    if (!c.env.DB?.batch) return c.json({ error: "Se requieren transacciones D1" }, 503);
+    await c.env.DB.batch([c.env.DB.prepare(`INSERT INTO professional_appointment_changes
+      (actor_id, session_version, appointment_id, action, old_status, old_date, old_start, old_end, new_date, new_start, new_end)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(actor.id, c.get("claims").sv, id, body.action,
+      existing.status, existing.scheduled_date, existing.start_time, existing.end_time, date, start, end)]);
+  } catch (cause) {
+    if (String(cause).includes("professional change conflict")) return c.json({ error: "El turno cambió o el horario no está disponible. Actualice la agenda." }, 409);
+    throw cause;
+  }
+  return c.json({ ok: true, manual_contact_required: body.action !== "completed",
+    message: body.action === "completed" ? "Turno finalizado. No se registró ningún pago." : "Cambio guardado. Debe notificar al cliente fuera de la aplicación; no se envió ningún mensaje." });
 });
 
 // ── Public booking (customer-facing) ───────────────────────────────
@@ -280,7 +420,7 @@ app.get("/api/admin/companies", async (c) => {
 });
 
 app.post("/api/admin/users", async (c) => {
-  const parsed = userInput.extend({ company_id: z.number().int().positive().nullable().optional(), agreement_confirmed: z.boolean().optional() }).safeParse(await c.req.json().catch(() => null));
+  const parsed = userInput.extend({ company_id: z.number().int().positive().nullable().optional(), agreement_confirmed: z.boolean().optional() }).strict().safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "Datos inválidos" }, 400);
   const companyId = parsed.data.company_id ?? null;
   if (companyId && !(await get("SELECT id FROM companies WHERE id = ?", [companyId]))) return c.json({ error: "Empresa inexistente" }, 404);
@@ -385,6 +525,7 @@ const StaffHoursSchema = BusinessHoursSchema.refine((value) => normalizeHours(va
 const SchedulingModeSchema = z.enum(["consecutive", "fixed", "service_duration"]);
 const SchedulingIntervalSchema = z.number().int().min(1).max(240);
 const StaffSchema = z.object({
+  access_enabled: z.number().int().optional(),
   id: z.number().int(),
   name: z.string(),
   email: z.string(),
@@ -1269,7 +1410,7 @@ const listStaff = createRoute({
 
 app.openapi(listStaff, async (c) => {
   const staff = await query<StoredStaff>(
-    `SELECT s.*,
+    `SELECT s.*, EXISTS (SELECT 1 FROM professional_accounts pa WHERE pa.staff_id = s.id AND pa.company_id = o.company_id) AS access_enabled,
             COUNT(a.id) as appointment_count,
             COALESCE(SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END), 0) as completed_appointment_count,
             COALESCE(SUM(CASE WHEN a.status = 'completed' THEN a.total_price ELSE 0 END), 0) as completed_service_value
@@ -1360,30 +1501,73 @@ const updateStaff = createRoute({
       title: z.string().optional(),
       color: z.string().optional(),
       active: z.number().int().optional(),
+      professional_password: z.string().max(1024).refine((value) => value === "" || value.length >= 12, "Minimum 12 characters").optional(),
       working_hours: StaffHoursSchema.optional(),
       scheduling_mode: SchedulingModeSchema.optional(),
       scheduling_interval: SchedulingIntervalSchema.optional(),
       service_ids: ServiceIdsSchema.optional(),
     }).strict() } } },
   },
-  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 400: { description: "Invalid service assignment", content: { "application/json": { schema: ErrorSchema } } }, 404: NotFoundResponse },
+  responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 400: { description: "Invalid staff or professional access data", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "Account collision or stale staff access; no changes saved", content: { "application/json": { schema: ErrorSchema } } }, 404: NotFoundResponse },
 });
 
 app.openapi(updateStaff, async (c) => {
   const { id } = c.req.valid("param");
   if (!(await owns(c, "staff", id))) return c.json({ error: "No encontrado" }, 404);
   const body = c.req.valid("json");
+  const member = await get<{ email: string | null; active: number }>("SELECT email, active FROM staff WHERE id = ?", [id]);
+  if (!member) return c.json({ error: "No encontrado" }, 404);
+  const linked = await get<{ id: number; role: string; company_id: number; email: string; session_version: number }>(`SELECT u.id, u.role, u.company_id, u.email, u.session_version FROM professional_accounts pa
+    JOIN users u ON u.id = pa.user_id WHERE pa.staff_id = ? AND pa.company_id = ?`, [id, tenant(c)]);
+  const password = body.professional_password || "";
+  const email = (body.email ?? member.email ?? "").trim().toLowerCase();
+  if (linked || password) {
+    if (!z.string().email().max(254).safeParse(email).success) return c.json({ error: "Indique un correo electrónico válido para el acceso profesional. No se puede quitar el correo de una cuenta vinculada." }, 400);
+    if (linked && (linked.role !== "tenant" || linked.company_id !== tenant(c))) return c.json({ error: "La cuenta vinculada no es un acceso profesional válido" }, 409);
+    const collision = await get<{ id: number }>("SELECT id FROM users WHERE email = ?", [email]);
+    if (collision && collision.id !== linked?.id) return c.json({ error: "El correo ya pertenece a otra cuenta. Use un correo exclusivo de este profesional." }, 409);
+    if (password && (member.active !== 1 || (body.active !== undefined && body.active !== 1))) return c.json({ error: "Active al profesional antes de crear o cambiar su acceso" }, 400);
+    body.email = email;
+  }
   const sets: string[] = [];
   const params: (string | number | null)[] = [];
   if (!(await validServiceAssignments(c, body.service_ids))) return c.json({ error: "Servicio no encontrado en la empresa" }, 400);
   for (const [key, val] of Object.entries(body)) {
-    if (key !== "service_ids" && val !== undefined) {
+    if (key !== "service_ids" && key !== "professional_password" && val !== undefined) {
       sets.push(`${key} = ?`);
       params.push(key === "working_hours" && val !== null ? JSON.stringify(val) : val as string | number | null);
     }
   }
   const db = c.env.DB;
   const statements = [];
+  {
+    const actor = c.get("actor");
+    // Recheck the snapshots after hashing, inside the transaction. A stale edit
+    // aborts the whole batch rather than leaving a credential without its binding.
+    const passwordHash = password ? await hashPassword(password) : null;
+    statements.push(db.prepare(`SELECT CASE WHEN EXISTS (
+      SELECT 1 FROM users u JOIN companies co ON co.id = u.company_id
+      JOIN tenant_ownership o ON o.company_id = co.id AND o.resource_type = 'staff' AND o.resource_id = ?
+      JOIN staff s ON s.id = o.resource_id
+      WHERE u.id = ? AND u.role = 'tenant' AND u.company_id = ? AND u.session_version = ? AND co.status = 'active'
+        AND NOT EXISTS (SELECT 1 FROM professional_accounts WHERE user_id = u.id)
+        AND s.email IS ? AND s.active = ?
+        AND COALESCE((SELECT user_id FROM professional_accounts WHERE staff_id = s.id), 0) = ?
+    ) AND (? = 0 OR EXISTS (SELECT 1 FROM users WHERE id = ? AND email = ? AND session_version = ? AND role = 'tenant' AND company_id = ?))
+    THEN 1 ELSE json('stale professional access') END`)
+      .bind(Number(id), actor.id, tenant(c), actor.session_version, member.email, member.active, linked?.id ?? 0,
+        linked?.id ?? 0, linked?.id ?? 0, linked?.email ?? "", linked?.session_version ?? 0, tenant(c)));
+    if (linked) {
+      statements.push(db.prepare(`UPDATE users SET email = ?, password_hash = COALESCE(?, password_hash),
+        session_version = session_version + ? WHERE id = ?`)
+        .bind(email, passwordHash, password || email !== linked.email ? 1 : 0, linked.id));
+    } else if (password) {
+      statements.push(db.prepare("INSERT INTO users (email, password_hash, role, company_id) VALUES (?, ?, 'tenant', ?)")
+        .bind(email, passwordHash, tenant(c)));
+      statements.push(db.prepare(`INSERT INTO professional_accounts (user_id, company_id, staff_id)
+        SELECT id, ?, ? FROM users WHERE email = ?`).bind(tenant(c), Number(id), email));
+    }
+  }
   if (sets.length > 0) {
     statements.push(db.prepare(`UPDATE staff SET ${sets.join(", ")} WHERE id = ? AND EXISTS
       (SELECT 1 FROM tenant_ownership o WHERE o.resource_type = 'staff' AND o.resource_id = staff.id AND o.company_id = ?)`).bind(...params, id, tenant(c)));
@@ -1397,6 +1581,7 @@ app.openapi(updateStaff, async (c) => {
     try { await db.batch(statements); }
     catch (cause) {
       if (String(cause).includes("staff service must belong to company")) return c.json({ error: "Servicio no encontrado en la empresa" }, 400);
+      if (linked || password || String(cause).includes("malformed JSON")) return c.json({ error: "No se guardaron los cambios. El correo o el acceso cambió; actualice la ficha y use un correo exclusivo del profesional." }, 409);
       throw cause;
     }
   }
@@ -2004,6 +2189,7 @@ const publicBook = createRoute({
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       start_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
       staff_id: z.number().int().optional(),
+      contact_phone: z.string().refine((value) => contactPhone(value) !== null, "Ingrese un teléfono de contacto válido"),
     }) } } },
   },
   responses: {
@@ -2073,13 +2259,19 @@ app.openapi(publicBook, async (c) => {
 
   // One file per customer per company, matched on the verified email.
   const email = c.get("customer").email.trim().toLowerCase();
-  const client = await get<{ id: number }>(`SELECT c.id FROM clients c JOIN tenant_ownership o
-    ON o.resource_type = 'clients' AND o.resource_id = c.id
-    WHERE o.company_id = ? AND lower(trim(c.email)) = ? ORDER BY c.id LIMIT 1`, [company.id, email]);
-  const clientStatements = client ? [] : [
-    db.prepare("INSERT INTO clients (name, email, phone, notes) VALUES (?, ?, '', '')")
-      .bind(c.get("customer").name.trim().slice(0, 120) || email, email),
-    db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('clients', last_insert_rowid(), ?)").bind(company.id),
+  // Recheck reuse inside the transaction, including concurrent bookings for the
+  // same customer. Only this company's contact is updated, never a global identity.
+  const clientStatements = [
+    db.prepare(`INSERT INTO clients (name, email, phone, notes) SELECT ?, ?, ?, '' WHERE NOT EXISTS
+      (SELECT 1 FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
+        WHERE o.company_id = ? AND lower(trim(c.email)) = ?)`)
+      .bind(c.get("customer").name.trim().slice(0, 120) || email, email, contactPhone(body.contact_phone), company.id, email),
+    db.prepare(`INSERT INTO tenant_ownership (resource_type, resource_id, company_id)
+      SELECT 'clients', last_insert_rowid(), ? WHERE changes() = 1`).bind(company.id),
+    db.prepare(`UPDATE clients SET phone = ?, updated_at = datetime('now') WHERE id =
+      (SELECT c.id FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
+        WHERE o.company_id = ? AND lower(trim(c.email)) = ? ORDER BY c.id LIMIT 1)`)
+      .bind(contactPhone(body.contact_phone), company.id, email),
   ];
   const admissionId = crypto.randomUUID();
 

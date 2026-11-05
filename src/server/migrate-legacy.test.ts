@@ -8,6 +8,38 @@ const schema = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
 const migration = readFileSync(new URL("./migrate-legacy.sql", import.meta.url), "utf8");
 const types = ["clients", "staff", "services", "appointments", "appointment_services", "appointment_notes", "blocked_slots", "products"];
 
+test("professional schema upgrades original users without rebuilding, changing existing rows or granting restrictions", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    const originalSchema = schema
+      .replace(/-- A sidecar restricts[\s\S]*?(?=CREATE TABLE IF NOT EXISTS company_onboarding)/, "")
+      .replace(/-- Immutable action history[\s\S]*?(?=-- An admission row)/, "");
+    db.exec(originalSchema);
+    db.exec(`INSERT INTO companies (id, name, status) VALUES (1, 'Original', 'active');
+      INSERT INTO users (id, email, password_hash, role, company_id, session_version) VALUES
+        (1, 'original@example.test', 'preserved-hash', 'tenant', 1, 7);
+      INSERT INTO staff (id, name) VALUES (1, 'Original staff');
+      INSERT INTO clients (id, name, phone) VALUES (1, 'Original client', 'original-contact');
+      INSERT INTO appointments (id, identifier, client_id, staff_id, scheduled_date) VALUES (1, 'APT-8', 1, 1, '2037-11-02');
+      INSERT INTO tenant_ownership VALUES ('staff', 1, 1), ('clients', 1, 1), ('appointments', 1, 1);
+      INSERT INTO _meta VALUES ('appointment_counter', '8'), ('appointment_prefix', 'APT');`);
+    const tables = [...types, "users", "companies", "tenant_ownership", "auth_audit", "_meta"];
+    const original = () => tables.map((name) => db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all());
+    const before = original();
+    const userDefinition = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'users'").get()?.sql;
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'professional_accounts'").get()?.n, 0);
+    for (let pass = 0; pass < 2; pass++) {
+      db.exec(schema); db.exec(migration);
+      assert.deepEqual(original(), before);
+      assert.equal(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'users'").get()?.sql, userDefinition);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_accounts").get()?.n, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 0);
+      assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    }
+  } finally { db.close(); }
+});
+
 test("scheduling migration defaults legacy staff to fixed/30 and preserves configured policy on repeat", () => {
   const db = new DatabaseSync(":memory:");
   try {

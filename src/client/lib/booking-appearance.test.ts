@@ -96,21 +96,20 @@ test("preview renders the actual public booking layout, reuses logo/legal identi
     assert.equal(nodes(CompanyPublicDetails({ company: overview.company, preview: true })).find((n) => n.type === "img").props.src, company.logo_url);
     assert.equal(overview.staff[0].id, -1); assert.equal(overview.services[0].name, "Servicio de ejemplo");
     const tree = nodes(render(hooks(), () => BookPublic({ slug: "preview", preview: overview })));
-    assert.ok(tree.includes("1. Elegí un servicio o un profesional"));
-    assert.ok(tree.includes("2. Elegí día y horario"));
+    assert.ok(tree.includes("Su turno empieza aquí"));
+    assert.ok(!tree.includes("Encuentre su momento"), "only the login step is shown initially");
     assert.ok(tree.some((n) => n.props?.company?.logo_url === company.logo_url));
-    assert.ok(tree.some((n) => n.type?.name === "LegalLinks"));
-    assert.ok(tree.some((n) => n.props?.time === "10:00"), "actual sign-in presentation is reused");
-    const prompt = tree.find((n) => n.props?.time === "10:00");
-    assert.ok(nodes(prompt.type(prompt.props)).every((n) => !n.props?.href?.includes("/api/auth/customer/google")));
+    assert.ok(nodes(BookingPageFrame(tree[0].props)).some((n) => n.type?.name === "LegalLinks"));
+    assert.ok(tree.includes("Simular ingreso con Google"));
+    assert.ok(tree.every((n) => !n.props?.href?.includes("/api/auth/customer/google")));
     assert.ok(tree.includes(design.welcome));
     assert.ok(tree.every((n) => !n.props?.dangerouslySetInnerHTML));
     const coverClasses = tree.find((n) => n.type === "img").props.className.split(/\s+/);
-    for (const name of ["aspect-[3/1]", "w-full", "object-cover", "object-center"])
+    for (const name of ["booking-cover", "w-full", "object-cover", "object-center"])
       assert.ok(coverClasses.includes(name), `cover preserves ${name}`);
-    assert.equal(tree.find((n) => n.type === "fieldset").props.disabled, true);
+    assert.equal(tree.find((n) => n.type === "fieldset").props.hidden, true);
     const frame = BookingPageFrame(tree[0].props);
-    assert.equal(frame.props.inert, true);
+    assert.equal(frame.props.inert, undefined, "fictional wizard navigation remains interactive");
     for (const key of ["--background", "--card", "--muted", "--accent", "--secondary"]) assert.equal(frame.props.style[key], design.background);
     for (const key of ["--foreground", "--card-foreground", "--muted-foreground"]) assert.equal(frame.props.style[key], design.text);
     assert.equal(frame.props.style["--primary"], design.button);
@@ -119,10 +118,33 @@ test("preview renders the actual public booking layout, reuses logo/legal identi
   } finally { globalThis.fetch = previousFetch; delete (globalThis as any).__appearanceHooks; }
 });
 
+test("editorial booking fonts are local licensed Latin subsets and layout responds to its own container", async () => {
+  const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  let total = 0;
+  for (const family of ["fraunces", "dm-sans"]) {
+    const font = await readFile(new URL(`../../../public/fonts/booking/${family}-latin-400.woff2`, import.meta.url));
+    assert.equal(font.subarray(0, 4).toString(), "wOF2");
+    total += font.length;
+    assert.match(await readFile(new URL(`../../../public/fonts/booking/${family}-OFL.txt`, import.meta.url), "utf8"), /SIL OPEN FONT LICENSE Version 1\.1/);
+    assert.ok(css.includes(`url("/fonts/booking/${family}-latin-400.woff2")`));
+  }
+  assert.ok(total < 35000, "two display/body subsets stay economical");
+  assert.match(css, /\.booking-appearance\s*\{[^}]*font-family: "Booking DM Sans"/);
+  assert.match(css, /\.booking-appearance :is\(h1, h2, \.booking-welcome-title\)[^}]*font-family: "Booking Fraunces"/);
+  assert.match(css, /@container booking \(min-width: 480px\)/);
+  assert.match(css, /@container booking \(min-width: 960px\)/);
+  assert.match(css, /\.booking-service-content\s*\{[^}]*grid-template-columns: 1\.5rem minmax\(0, 1fr\)/);
+  assert.match(css, /\.booking-cover\s*\{[^}]*aspect-ratio: 16 \/ 9/);
+  const index = await readFile(new URL("../../../index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(index, /fonts\.googleapis|fonts\.gstatic/, "booking HTML must not start a third-party font connection before rendering");
+  const main = await readFile(new URL("../main.tsx", import.meta.url), "utf8");
+  assert.match(main, /if \(!\/\^\\\/book\\\//, "existing platform font loading excludes public booking routes");
+});
+
 test("booking layout bounds intrinsic content and confines stable day targets to their own scroll strip", async () => {
   const { appearancePreview } = await load("booking-appearance-editor");
   const { BookPublic } = await load("book-public");
-  const overview = appearancePreview({ ...company, name: "Company".repeat(30) }, defaultAppearance, null);
+  const overview = appearancePreview({ ...company, name: "Company".repeat(30) }, defaultAppearance, "blob:example-cover");
   overview.services[0].name = "VeryLongService".repeat(30);
   overview.services[0].price = 1234567890123;
   overview.staff[0].name = "Professional".repeat(30);
@@ -130,18 +152,24 @@ test("booking layout bounds intrinsic content and confines stable day targets to
   const draw = () => nodes(render(state, () => BookPublic({ slug: "preview", preview: overview })));
   try {
     let tree = draw();
+    assert.ok(tree.some((n) => n.type === "img" && n.props.className.includes("booking-cover")), "cover introduces the business on the welcome step");
+    tree.find((n) => typeof n.props?.onClick === "function" && nodes(n).includes("Simular ingreso con Google")).props.onClick(); tree = draw();
+    assert.ok(!tree.some((n) => n.type === "img" && n.props.className.includes("booking-cover")), "later steps retain identity without repeating the cover");
+    assert.ok(tree.some((n) => n.type === "header" && n.props["data-compact"]), "identity becomes compact after welcome");
     assert.match(tree.find((n) => n.type === "fieldset").props.className, /min-w-0/);
     const card = tree.find((n) => n.props?.role === "button");
     assert.match(card.props.className, /min-w-0/);
-    assert.equal(card.props["aria-pressed"], true);
+    assert.equal(card.props["aria-pressed"], false);
     const content = nodes(card).find((n) => n.type?.displayName === "CardContent");
-    assert.match(content.props.className, /flex-col items-start/);
+    assert.match(content.props.className, /booking-service-content min-w-0/);
     assert.ok(nodes(card).includes(overview.services[0].name), "full service name is retained, not clipped");
     assert.ok(nodes(card).every((n) => !n.props?.className?.includes("truncate")));
-    const clear = tree.find((n) => n.props?.children === "Ver todos los profesionales / Limpiar servicio");
+    const clear = tree.find((n) => n.props?.children === "Ver todos / Limpiar");
     assert.match(clear.props.className, /max-w-full whitespace-normal/);
     const professional = tree.find((n) => n.type === "button" && nodes(n).includes(overview.staff[0].name));
     assert.match(professional.props.className, /min-h-11 min-w-0 max-w-full/);
+    card.props.onClick(); tree = draw();
+    tree.find((n) => n.props?.children === "Continuar").props.onClick(); tree = draw();
     const strip = tree.find((n) => n.props?.["aria-label"] === "Días disponibles");
     assert.match(strip.props.className, /min-w-0 max-w-full.*overflow-x-auto overscroll-x-contain/);
     assert.equal(strip.props.tabIndex, 0);
@@ -159,7 +187,7 @@ test("booking layout bounds intrinsic content and confines stable day targets to
     assert.equal(prevented, true, "service keyboard activation is retained");
     const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
     assert.match(css, /\.booking-page-content\s*\{[^}]*overflow-wrap: anywhere/);
-    assert.match(css, /@container booking \(min-width: 640px\)/);
+    assert.match(css, /@container booking \(min-width: 480px\)/);
     assert.doesNotMatch(css, /\.booking-appearance-editor button\s*\{/, "editor action sizing must not override preview day circles");
     assert.doesNotMatch(css, /overflow-x:\s*hidden/);
   } finally { delete (globalThis as any).__appearanceHooks; }

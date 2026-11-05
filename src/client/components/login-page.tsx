@@ -4,11 +4,12 @@ import { LegalLinks } from "./legal-pages";
 
 type LoginPageProps = {
   error: string;
+  professional?: boolean;
   onSubmit: JSX.GenericEventHandler<HTMLFormElement>;
 };
 
 /** Platform sign-in stays independent of public company appearance settings. */
-export function LoginPage({ error, onSubmit }: LoginPageProps) {
+export function LoginPage({ error, onSubmit, professional = false }: LoginPageProps) {
   return <main className="platform-login">
     <div className="platform-login__decoration" aria-hidden="true">
       <div className="platform-login__orbit" />
@@ -19,8 +20,8 @@ export function LoginPage({ error, onSubmit }: LoginPageProps) {
         <BrandLogo className="platform-login__logo" decorative />
         <header className="platform-login__heading">
           <p className="platform-login__eyebrow">Tu espacio de trabajo</p>
-          <h1 id="login-title">Ingresar a Youturno</h1>
-          <p>Te damos la bienvenida. Ingresa a tu cuenta para continuar.</p>
+          <h1 id="login-title">{professional ? "Portal del profesional" : "Ingresar a Youturno"}</h1>
+          <p>{professional ? "Ingrese con el correo de su ficha y la contraseña establecida por la administración de su empresa." : "Te damos la bienvenida. Ingresa a tu cuenta para continuar."}</p>
         </header>
         <form className="platform-login__form" onSubmit={onSubmit}>
           <label>Correo electrónico
@@ -32,6 +33,7 @@ export function LoginPage({ error, onSubmit }: LoginPageProps) {
           <button type="submit">Ingresar<span aria-hidden="true">→</span></button>
         </form>
         {error && <p className="platform-login__error" role="alert">{error}</p>}
+        {professional && <a href="/" className="text-sm underline">Ingreso de administración</a>}
       </section>
       <footer className="platform-login__footer"><LegalLinks /></footer>
     </div>

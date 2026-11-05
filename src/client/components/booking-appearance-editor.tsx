@@ -95,7 +95,7 @@ export function BookingAppearanceEditor() {
               }
               setFile(selected); setRemoveCover(false); setNotice("");
             }} /></label>
-          <p id="cover-help" className="text-sm">PNG o JPEG, máximo 512 KB y 4096 × 4096 píxeles. Se recorta visualmente al centro en proporción 3:1, sin deformar. La imagen original se conserva. La portada no se publica al seleccionarla.</p>
+          <p id="cover-help" className="text-sm">PNG o JPEG, máximo 512 KB y 4096 × 4096 píxeles. Se recorta visualmente al centro en proporción 16:9, sin deformar. La imagen original se conserva. La portada no se publica al seleccionarla.</p>
           {(cover || file) && <Button type="button" variant="outline" onClick={() => { setFile(null); setRemoveCover(true); }}>Quitar portada al guardar</Button>}
           <p id="appearance-save-help" role="status" className="text-sm">
             {busy ? "Guardando diseño. Espere a que termine la publicación." : invalid
@@ -117,7 +117,7 @@ export function BookingAppearanceEditor() {
       </form>
       <section className="space-y-3" aria-labelledby="appearance-preview-title">
         <h2 id="appearance-preview-title" className="text-lg font-semibold">Vista previa en vivo</h2>
-        <p>Datos de ejemplo. Esta vista no permite reservar, iniciar sesión ni abrir enlaces. Los horarios siguen en UTC.</p>
+        <p>Datos de ejemplo. Puede recorrer los pasos sin iniciar sesión ni crear reservas. Los enlaces no se abren y los horarios siguen en UTC.</p>
         <div className="flex gap-2">
           <Button variant="outline" aria-pressed={width === "mobile"} onClick={() => setWidth("mobile")}>Móvil</Button>
           <Button variant="outline" aria-pressed={width === "desktop"} onClick={() => setWidth("desktop")}>Escritorio</Button>

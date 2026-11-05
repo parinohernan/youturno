@@ -1,0 +1,146 @@
+/* Private workspace only. Public booking and tenant administration keep their themes. */
+.professional-agenda {
+  --pa-paper: #f7f6f0;
+  --pa-ink: #243c35;
+  --pa-muted: #59665d;
+  --pa-line: #d5d9ce;
+  --pa-accent: #dce8bc;
+  color: var(--pa-ink);
+  background: var(--pa-paper);
+  font: 400 15px/1.5 "Booking DM Sans", "Trebuchet MS", sans-serif;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+main.professional-agenda { min-height: 100vh; min-height: 100dvh; }
+.professional-agenda *, .professional-agenda *::before, .professional-agenda *::after { box-sizing: border-box; }
+.professional-agenda button, .professional-agenda a, .professional-agenda input, .professional-agenda summary { -webkit-tap-highlight-color: transparent; }
+.professional-agenda button, .professional-agenda a, .professional-agenda summary { touch-action: manipulation; }
+.professional-agenda button { cursor: pointer; font: inherit; }
+.professional-agenda button:disabled { opacity: .5; cursor: not-allowed; }
+.professional-agenda :is(button, a, input, summary, [tabindex]):focus-visible { outline: 2px solid #245d49; outline-offset: 3px; }
+.pa-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px max(20px, calc((100vw - 960px) / 2)); border-bottom: 1px solid var(--pa-line); background: #eeeee5; }
+.pa-context { min-width: 0; }
+.pa-context p { font-size: 12px; color: var(--pa-muted); margin-top: 3px; }
+.pa-brand { font-size: 18px; letter-spacing: -.6px; font-weight: 600; }
+.pa-brand > span { color: #7e8b77; margin: 0 7px; }
+.pa-brand small { font-size: 11px; letter-spacing: .04em; font-weight: 400; }
+.pa-quiet { min-height: 44px; padding: 8px 10px; flex-shrink: 0; text-decoration: underline; text-underline-offset: 4px; font-size: 12px !important; }
+.pa-workspace { width: 100%; max-width: 840px; margin: auto; padding: 28px 20px max(28px, env(safe-area-inset-bottom)); }
+.pa-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.pa-eyebrow { display: block; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+.pa-heading h1 { font: 400 clamp(38px, 8vw, 56px)/1.15 "Booking Fraunces", Georgia, serif; letter-spacing: -1.5px; margin-top: 6px; }
+.pa-heading h1 > span { color: #758952; }
+.pa-zone { border: 1px solid var(--pa-line); padding: 4px 8px; font-size: 10px; letter-spacing: .08em; }
+.pa-sync { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0 12px; color: var(--pa-muted); font-size: 12px; }
+.pa-notice { padding: 12px 14px; margin: 12px 0; border: 1px solid #b6c5a4; background: #edf1e2; font-size: 13px; }
+.pa-notice button { min-height: 44px; text-decoration: underline; text-underline-offset: 3px; }
+.pa-error { border-color: #c19485; background: #f7e9e2; color: #803921; }
+.pa-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--pa-line); }
+.pa-tabs button { min-height: 48px; padding: 10px 2px; border-bottom: 3px solid transparent; color: var(--pa-muted); }
+.pa-tabs button[aria-selected=true] { color: var(--pa-ink); border-color: var(--pa-ink); font-weight: 600; }
+.pa-datebar { display: grid; grid-template-columns: 36px minmax(0, 1fr) 36px 44px; align-items: center; gap: 5px; padding: 18px 0; }
+.pa-datebar > button { min-height: 44px; min-width: 44px; justify-self: center; }
+.pa-datebar label { min-width: 0; }
+.pa-datebar input { width: 100%; min-width: 0; min-height: 44px; padding: 3px 0; font-size: 16px; background: transparent; color: var(--pa-ink); }
+.pa-today { font-size: 12px !important; text-decoration: underline; text-underline-offset: 4px; }
+.pa-next { display: block; width: 100%; text-align: left; background: var(--pa-ink); color: #fffef8; padding: 18px; border-radius: 2px; }
+.pa-next > .pa-eyebrow { color: #e0e9cd; }
+.pa-next-main { display: flex; align-items: flex-start; gap: 16px; padding: 16px 0 20px; }
+.pa-next-main > strong { font: 400 32px/1.1 "Booking Fraunces", Georgia, serif; letter-spacing: -1px; flex-shrink: 0; }
+.pa-next-main > span:nth-child(2) { flex: 1; min-width: 0; font-size: 15px; }
+.pa-next-main small { display: block; font-size: 11px; color: #e0e9cd; margin-top: 4px; }
+.pa-next-footer { display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid #61756b; padding-top: 10px; font-size: 11px; }
+.pa-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 24px 0 6px; }
+.pa-section-heading h2 { font-size: 16px; font-weight: 600; }
+.pa-section-heading > span { font-size: 11px; color: var(--pa-muted); }
+.pa-list { border-top: 1px solid var(--pa-line); padding: 0; list-style: none; }
+.pa-list li { border-bottom: 1px solid var(--pa-line); }
+.pa-row { display: grid; grid-template-columns: 54px minmax(0, 1fr) 16px; gap: 14px; width: 100%; padding: 18px 0; text-align: left; align-items: start; }
+.pa-time { display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
+.pa-time strong { font-size: 17px; font-weight: 500; line-height: 1.2; }
+.pa-time > span { font-size: 11px; color: var(--pa-muted); margin-top: 5px; }
+.pa-row-content { min-width: 0; }
+.pa-row-content > strong { font-weight: 600; font-size: 14px; display: block; }
+.pa-row-content > span:not(.pa-status) { display: block; color: var(--pa-muted); font-size: 11px; margin: 4px 0 8px; }
+.pa-arrow { font-size: 18px; }
+.pa-status { display: inline-flex; font-size: 11px; line-height: 1.4; padding: 3px 7px; border: 1px solid #bec8ba; border-radius: 3px; background: #eaf0e0; color: #314b32; }
+.pa-status[data-status=in_progress] { background: #dce8bc; border-color: #8f9f76; }
+.pa-status[data-status=completed] { background: #e9ebe7; color: #4f5c52; }
+.pa-status[data-status=cancelled], .pa-status[data-status=no_show] { background: #f3e7e0; border-color: #d1aa9c; color: #803921; }
+.pa-empty { text-align: center; padding: 40px 16px; border-bottom: 1px solid var(--pa-line); }
+.pa-empty > span { font: 32px "Booking Fraunces", Georgia, serif; color: #758952; }
+.pa-empty h3 { font: 24px "Booking Fraunces", Georgia, serif; margin: 8px 0; }
+.pa-empty p, .pa-view-note { color: var(--pa-muted); font-size: 13px; }
+.pa-view-note { margin-top: 20px; }
+.professional-agenda summary { cursor: pointer; min-height: 48px; padding: 12px 0; font-size: 13px; }
+.pa-hours { border-bottom: 1px solid var(--pa-line); margin-top: 24px; }
+.pa-hours summary > span, .pa-history summary > span { font-size: 10px; margin-left: 8px; color: var(--pa-muted); }
+.pa-hours li { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; font-size: 12px; }
+.pa-hours ul { padding-bottom: 12px; }
+.pa-footnote { font-size: 11px; color: var(--pa-muted); max-width: 420px; margin-top: 18px; }
+.pa-overlay { position: fixed; inset: 0; z-index: 60; background: #14231d80; animation: pa-fade 160ms ease-out; }
+.pa-sheet { position: fixed; z-index: 61; inset: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; max-height: 100dvh; animation: pa-enter 180ms ease-out; box-shadow: 0 20px 80px #14231d33; }
+.pa-sheet-top { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: max(8px, env(safe-area-inset-top)) 20px 8px; border-bottom: 1px solid var(--pa-line); flex-shrink: 0; }
+.pa-sheet-top button span { font-size: 22px; margin-left: 8px; vertical-align: middle; }
+.pa-sheet-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px 20px max(32px, env(safe-area-inset-bottom)); scrollbar-gutter: stable; }
+.pa-detail-title { font: 400 32px/1.15 "Booking Fraunces", Georgia, serif; letter-spacing: -.5px; }
+.pa-detail-description { color: var(--pa-muted); font-size: 12px; margin: 10px 0 20px; }
+.pa-slot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; border-block: 1px solid var(--pa-line); padding: 16px 0; }
+.pa-slot strong { display: block; font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.pa-slot p > span { display: block; color: var(--pa-muted); font-size: 11px; }
+.pa-detail-section { border-bottom: 1px solid var(--pa-line); padding: 20px 0 12px; }
+.pa-detail-section h3, .pa-actions legend { font-size: 12px; font-weight: 600; }
+.pa-phone { font-size: 20px; margin-top: 12px; user-select: text; }
+.pa-muted { color: var(--pa-muted); font-size: 11px; }
+.pa-contact-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+.pa-button { display: flex; align-items: center; justify-content: center; gap: 12px; text-align: center; width: 100%; min-height: 48px; padding: 12px 14px; background: var(--pa-ink); color: #fffef8; border: 1px solid var(--pa-ink); border-radius: 3px; font-size: 13px !important; text-decoration: none; line-height: 1.4; }
+.pa-secondary { background: transparent; color: var(--pa-ink); border-color: #aeb8a9; }
+.pa-destructive { background: #853d2d; color: white; border-color: #853d2d; }
+.pa-danger-link { width: 100%; min-height: 48px; color: #803921; text-decoration: underline; text-underline-offset: 4px; font-size: 12px !important; margin-top: 8px; }
+.pa-services li { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; font-size: 13px; margin-top: 14px; }
+.pa-services li > span:first-child { min-width: 0; }
+.pa-services small { display: block; color: var(--pa-muted); font-size: 11px; }
+.pa-services li > span:last-child { flex-shrink: 0; font-size: 12px; }
+.pa-notes { white-space: pre-wrap; font-size: 13px; padding: 12px; margin-top: 12px; background: #eeeee5; border-left: 2px solid #94a277; }
+.pa-actions { min-width: 0; padding: 20px 0 12px; }
+.pa-actions legend { padding-top: 20px; }
+.pa-actions > .pa-muted { text-align: center; margin: 7px 0 18px; }
+.pa-reschedule { display: grid; gap: 14px; }
+.pa-reschedule h3 { font: 24px "Booking Fraunces", Georgia, serif; }
+.pa-reschedule p { font-size: 12px; color: var(--pa-muted); }
+.pa-reschedule label:not(.pa-check) { display: grid; gap: 5px; font-size: 13px; }
+.pa-reschedule input:not([type=checkbox]) { width: 100%; min-width: 0; min-height: 48px; border: 1px solid #aeb8a9; padding: 10px; background: #fffef8; border-radius: 3px; font: inherit; font-size: 16px; }
+.pa-reschedule .pa-error { color: #803921; }
+.pa-check { display: flex; align-items: flex-start; gap: 12px; min-height: 48px; padding: 10px 0; font-size: 12px; }
+.pa-check input { width: 20px; height: 20px; flex-shrink: 0; margin-top: 2px; accent-color: var(--pa-ink); }
+.pa-history { border-top: 1px solid var(--pa-line); }
+.pa-history li { border-left: 1px solid #aeb8a9; padding: 0 0 16px 12px; font-size: 12px; white-space: pre-wrap; }
+.pa-history small { font-size: 10px; color: var(--pa-muted); }
+.pa-confirm-overlay { z-index: 70; }
+.pa-confirm { position: fixed; z-index: 71; left: 50%; top: 50%; transform: translate(-50%, -50%); width: calc(100% - 32px); max-width: 420px; max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow-y: auto; overscroll-behavior: contain; padding: 24px; border-radius: 4px; box-shadow: 0 20px 80px #14231d33; }
+.pa-confirm h2 { font: 28px/1.2 "Booking Fraunces", Georgia, serif; }
+.pa-confirm p { margin: 16px 0; font-size: 13px; }
+.pa-confirm > .pa-button { margin-top: 10px; }
+@media (max-width: 359px) {
+  .pa-next-main { display: grid; grid-template-columns: 1fr auto; gap: 12px; }
+  .pa-next-main > span:nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+  .pa-next-main > span:last-child { grid-column: 2; grid-row: 1; }
+}
+@media (min-width: 640px) {
+  .pa-workspace { padding: 44px 40px; }
+  .pa-datebar { grid-template-columns: 44px 200px 44px 1fr; gap: 14px; }
+  .pa-datebar .pa-today { justify-self: end; }
+  .pa-next { padding: 24px; }
+  .pa-next-main > strong { font-size: 42px; }
+  .pa-next-main > span:nth-child(2) { font-size: 19px; }
+  .pa-row { grid-template-columns: 74px minmax(0, 1fr) 20px; padding: 20px 0; }
+  .pa-row-content > strong { font-size: 16px; }
+  .pa-row-content > .pa-status { margin-top: 0; }
+  .pa-sheet { inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(600px, calc(100% - 48px)); height: auto; max-height: min(880px, calc(100vh - 64px)); max-height: min(880px, calc(100dvh - 64px)); border-radius: 5px; }
+  .pa-sheet-top { padding-inline: 32px; }
+  .pa-sheet-body { padding: 28px 32px 32px; }
+}
+@media (hover: hover) { .pa-row:hover { background: #eeeee5; } .pa-button:hover { filter: brightness(.94); } }
+@keyframes pa-enter { from { opacity: 0; margin-top: 8px; } to { opacity: 1; margin-top: 0; } }
+@keyframes pa-fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .pa-sheet, .pa-overlay { animation: none; } }

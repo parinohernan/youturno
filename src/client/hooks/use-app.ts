@@ -261,10 +261,10 @@ export function useAppState(isAgent: boolean, navigate: (to: string) => void): A
     await Promise.all([fetchStats(), fetchLookups()]);
   }, [fetchStaff, fetchStats, fetchLookups]);
 
-  const updateStaff = useCallback(async (id: number, data: Partial<Staff>) => {
+  const updateStaff = useCallback(async (id: number, data: Partial<Staff> & { professional_password?: string }) => {
     await api("PUT", `/api/staff/${id}`, data);
-    await fetchStaff();
-    await fetchLookups();
+    try { await fetchStaff(); await fetchLookups(); }
+    catch { setError("Los cambios se guardaron, pero no se pudo actualizar la lista. Actualice la página."); }
   }, [fetchStaff, fetchLookups]);
 
   const deleteStaff = useCallback(async (id: number) => {

@@ -84,6 +84,9 @@ test("login, CSRF, logout and DB revocation protect legacy routes", async (t) =>
   assert.match(login.cookie!, /HttpOnly/i);
   assert.match(login.cookie!, /Secure/i);
   assert.match(login.cookie!, /SameSite=Strict/i);
+  const wrongPortal = await request("POST", "/api/auth/login", { email: "owner@example.test", password: "owner secret password", professional_portal: true });
+  assert.equal(wrongPortal.status, 403);
+  assert.equal(wrongPortal.cookie, null, "professional entry never issues an admin session");
   const token = { jwt: login.cookie!.match(/__Host-youturno=([^;]+)/)![1], csrf: login.body.csrf };
   assert.equal((await request("GET", "/api/clients", undefined, token)).status, 200);
   assert.equal((await request("POST", "/api/clients", { name: "No CSRF" }, token, { "x-csrf-token": "" })).status, 403);
