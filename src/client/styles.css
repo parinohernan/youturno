@@ -339,3 +339,21 @@
 .platform-login__footer a { color: #e0e3e4; text-decoration: underline; text-underline-offset: 4px; }
 .platform-login__footer a:hover { color: #ffd478; }
 .platform-login__footer a:focus-visible { outline: 2px solid #ffd478; outline-offset: 4px; border-radius: 2px; }
+/* Stable portrait geometry shared by public booking, staff setup and own agenda. */
+.professional-avatar {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: #e9e9e5;
+  color: #535b55;
+  border: 1px solid #ced1ca;
+  vertical-align: middle;
+}
+.professional-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
+.pa-identity { display: flex; align-items: center; gap: 12px; min-width: 0; margin-bottom: 12px; }
+.pa-identity .pa-eyebrow { min-width: 0; overflow-wrap: anywhere; }
+.pa-heading > div { min-width: 0; }
+.pa-heading .pa-zone { flex-shrink: 0; white-space: nowrap; }

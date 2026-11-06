@@ -8,6 +8,7 @@ import { strings } from "@/lib/strings";
 import type { Staff } from "../types";
 import type { WeeklyHours } from "../types";
 import { WeeklyHoursEditor, hoursError } from "./weekly-hours-editor";
+import { StaffPhotoEditor, type StaffPhotoChange } from "./staff-photo-editor";
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#ef4444", "#14b8a6", "#f97316"];
 
@@ -32,9 +33,11 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
   const [accessEnabled, setAccessEnabled] = useState(Boolean(staff?.access_enabled));
   const portalPath = "/profesionales/login";
   const portalUrl = typeof window === "undefined" ? portalPath : `${window.location.origin}${portalPath}`;
+  const [photo, setPhoto] = useState<StaffPhotoChange>(undefined);
+  const [readingPhoto, setReadingPhoto] = useState(false);
 
   const handleSubmit = async () => {
-    if (submitting.current) return;
+    if (submitting.current || readingPhoto) return;
     const professionalPassword = passwordInput.current?.value || "";
     if (passwordInput.current) passwordInput.current.value = "";
     setChangingAccess(false);
@@ -53,6 +56,7 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
     try {
       const data = { name: name.trim(), email, phone, title, color, working_hours: hours, service_ids: serviceIds,
         scheduling_mode: schedulingMode, scheduling_interval: schedulingInterval,
+        ...(photo !== undefined ? { photo } : {}),
         ...(professionalPassword ? { professional_password: professionalPassword } : {}) };
       if (staff) await updateStaff(staff.id, data);
       else await addStaff(data);
@@ -76,6 +80,7 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
           <DialogTitle>{isEditing ? "Editar integrante" : "Agregar integrante"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
+          <StaffPhotoEditor src={staff?.photo_url} disabled={saving} onChange={setPhoto} onBusy={setReadingPhoto} />
           <div className="space-y-1.5">
             <Label>Nombre *</Label>
             <Input value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} placeholder="Nombre completo" />
@@ -174,7 +179,7 @@ export function CreateStaff({ onClose, staff }: { onClose: () => void; staff?: S
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button disabled={saving} onClick={handleSubmit}>{saving ? strings.saving : changingAccess ? (accessEnabled ? "Guardar y cambiar contraseña" : "Guardar y crear acceso") : isEditing ? strings.saveChanges : "Agregar integrante"}</Button>
+          <Button disabled={saving || readingPhoto} onClick={handleSubmit}>{saving ? strings.saving : changingAccess ? (accessEnabled ? "Guardar y cambiar contraseña" : "Guardar y crear acceso") : isEditing ? strings.saveChanges : "Agregar integrante"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

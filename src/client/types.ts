@@ -71,6 +71,7 @@ export interface Client {
 export type WeeklyHours = Record<string, [string, string][] | [string, string] | null>;
 
 export interface Staff {
+  photo_url?: string | null;
   access_enabled?: number | boolean;
   service_ids: number[];
   id: number;

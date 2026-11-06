@@ -95,6 +95,139 @@ function appearanceForm(settings: unknown = defaultAppearance, action?: string, 
   return form;
 }
 
+const portrait = { mime: "image/png", data: png.toString("base64") };
+const MAX_STAFF_BODY = Math.ceil(MAX_LOGO_BYTES / 3) * 4 + 64 * 1024;
+
+test("staff portraits create, replace, preserve and remove atomically with versioned minimal metadata", async (t) => {
+  const { db, request } = await harness(t);
+  db.exec(`INSERT INTO services (id, name) VALUES (1, 'Fixture service');
+    INSERT INTO tenant_ownership VALUES ('services', 1, 1);`);
+  const created = await request("POST", "/api/staff", { name: "Fixture professional", photo: portrait, service_ids: [1], email: "portrait@example.test", working_hours: { mon: [["09:00", "12:00"]] } });
+  assert.equal(created.status, 201);
+  const { staff } = await created.json();
+  assert.ok(staff.photo_url?.startsWith(`/api/staff/${staff.id}/photo?v=`));
+  assert.deepEqual(staff.service_ids, [1], "photo insertion must not disturb last_insert_rowid service assignment");
+  const url = staff.photo_url;
+  const image = await request("GET", url);
+  assert.equal(image.status, 200); assert.equal(image.headers.get("Content-Type"), "image/png");
+  assert.equal(image.headers.get("X-Content-Type-Options"), "nosniff");
+  assert.equal(image.headers.get("Cache-Control"), "no-store");
+  assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
+  assert.equal((await request("PUT", `/api/staff/${staff.id}`, { title: "Updated" })).status, 200);
+  const list = (await (await request("GET", "/api/staff")).json()).staff;
+  assert.equal(list[0].photo_url, url);
+  assert.ok(!JSON.stringify(list).includes(portrait.data));
+  assert.equal((await request("PUT", `/api/staff/${staff.id}`, { photo: { mime: "image/jpeg", data: jpeg.toString("base64") } })).status, 200);
+  const replaced = (await (await request("GET", "/api/staff")).json()).staff[0].photo_url;
+  assert.notEqual(replaced, url);
+  assert.equal((await request("GET", replaced)).headers.get("Content-Type"), "image/jpeg");
+  const overview = await (await request("GET", "/api/public/one/overview", undefined, 0)).json();
+  assert.match(overview.staff[0].photo_url, new RegExp(`^/api/public/one/staff/${staff.id}/photo\\?v=`));
+  assert.ok(!JSON.stringify(overview.staff).includes("portrait@example.test"));
+  assert.ok(!JSON.stringify(overview.staff).includes("bytes"));
+  assert.equal((await request("PUT", `/api/staff/${staff.id}`, { photo: null })).status, 200);
+  assert.equal((await request("GET", replaced)).status, 404);
+  assert.equal((await (await request("GET", "/api/staff")).json()).staff[0].photo_url, null);
+});
+
+test("invalid portrait cannot partially update staff, services, hours or professional credentials", async (t) => {
+  const { db, request } = await harness(t);
+  const created = await (await request("POST", "/api/staff", { name: "Fixture professional", email: "portrait@example.test", photo: portrait })).json();
+  const id = created.staff.id;
+  const before = db.prepare("SELECT * FROM staff WHERE id = ?").get(id);
+  for (const photo of [{ mime: "image/png", data: "not base64" }, { mime: "image/jpeg", data: portrait.data },
+    { mime: "image/svg+xml", data: Buffer.from("<svg/>").toString("base64") }, { mime: "image/png", data: Buffer.from("<html>bad</html>").toString("base64") },
+    { mime: "image/png", data: Buffer.alloc(MAX_LOGO_BYTES + 1).toString("base64") }]) {
+    const response = await request("PUT", `/api/staff/${id}`, { name: "Must not save", service_ids: [], working_hours: {}, professional_password: "fixture-secret-password", photo });
+    assert.equal(response.status, 400);
+    assert.deepEqual(db.prepare("SELECT * FROM staff WHERE id = ?").get(id), before);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM professional_accounts").get()?.n, 0);
+    assert.equal((await request("GET", created.staff.photo_url)).status, 200);
+  }
+  const largeDimensions = Buffer.from(png); largeDimensions.writeUInt32BE(4097, 16);
+  assert.equal((await request("PUT", `/api/staff/${id}`, { photo: { mime: "image/png", data: largeDimensions.toString("base64") } })).status, 400);
+  assert.equal((await request("PUT", `/api/staff/${id}`, { professional_password: "fixture-secret-password" })).status, 200);
+  const access = db.prepare("SELECT * FROM users WHERE email = 'portrait@example.test'").get();
+  assert.equal((await request("PUT", `/api/staff/${id}`, { professional_password: "", photo: null })).status, 200);
+  assert.deepEqual(db.prepare("SELECT * FROM users WHERE email = 'portrait@example.test'").get(), access, "blank password preserves credentials and sessions");
+});
+
+test("bounded staff mutations reject oversized streamed bodies without Content-Length before any mutation", async (t) => {
+  const { db, request } = await harness(t);
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(MAX_STAFF_BODY)); controller.enqueue(new Uint8Array(1)); controller.close(); } });
+  assert.equal((await request("POST", "/api/staff", stream, 1, { "content-type": "application/json" })).status, 413);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM staff").get()?.n, 0);
+  const malformed = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{"photo":')); controller.close(); } });
+  assert.equal((await request("POST", "/api/staff", malformed, 1, { "content-type": "application/json" })).status, 400);
+  assert.equal((await request("POST", "/api/staff", {}, 1, { "content-length": String(MAX_STAFF_BODY + 1) })).status, 413);
+});
+
+test("a failed photo write rolls back the whole staff, services, hours and credential batch", async (t) => {
+  const { db, request } = await harness(t);
+  const { staff } = await (await request("POST", "/api/staff", { name: "Fixture professional", email: "portrait@example.test", photo: portrait })).json();
+  const path = `/api/staff/${staff.id}`;
+  assert.equal((await request("PUT", path, { professional_password: "fixture-original-password" })).status, 200);
+  const beforeStaff = db.prepare("SELECT * FROM staff").all();
+  const beforeUsers = db.prepare("SELECT * FROM users").all();
+  const beforePhoto = db.prepare("SELECT * FROM staff_photos").all();
+  db.exec("CREATE TRIGGER fixture_reject_photo BEFORE UPDATE ON staff_photos BEGIN SELECT RAISE(ABORT, 'fixture photo failure'); END;");
+  const response = await request("PUT", path, { name: "Must roll back", email: "changed@example.test", professional_password: "fixture-replacement-password",
+    service_ids: [], working_hours: {}, scheduling_mode: "consecutive", photo: portrait });
+  assert.equal(response.status, 409);
+  assert.deepEqual(db.prepare("SELECT * FROM staff").all(), beforeStaff);
+  assert.deepEqual(db.prepare("SELECT * FROM users").all(), beforeUsers);
+  assert.deepEqual(db.prepare("SELECT * FROM staff_photos").all(), beforePhoto);
+});
+
+test("portrait reads and writes isolate tenants, public inactivity and restricted own-identity portal access", async (t) => {
+  const { db, request } = await harness(t);
+  const { staff } = await (await request("POST", "/api/staff", { name: "Fixture professional", photo: portrait })).json();
+  const path = `/api/staff/${staff.id}`;
+  assert.equal((await request("GET", staff.photo_url, undefined, 2)).status, 404);
+  assert.equal((await request("PUT", path, { photo: null }, 2)).status, 404);
+  assert.equal((await request("PUT", `${path}?company_id=2`, { photo: null })).status, 400);
+  assert.equal((await request("PUT", path, { photo: portrait, company_id: 2 })).status, 400);
+  const publicPath = `/api/public/one/staff/${staff.id}/photo`;
+  assert.equal((await request("GET", publicPath, undefined, 0)).status, 200);
+  assert.equal((await request("GET", `/api/public/two/staff/${staff.id}/photo`, undefined, 0)).status, 404);
+  db.exec(`UPDATE staff SET active = 0 WHERE id = ${staff.id}`);
+  assert.equal((await request("GET", publicPath, undefined, 0)).status, 404);
+  db.exec(`UPDATE staff SET active = 1 WHERE id = ${staff.id}; UPDATE companies SET status = 'disabled' WHERE id = 1`);
+  assert.equal((await request("GET", publicPath, undefined, 0)).status, 404);
+  db.exec(`UPDATE companies SET status = 'active' WHERE id = 1;
+    INSERT INTO users (id, email, password_hash, role, company_id) VALUES (6, 'own-fixture@example.test', 'unused', 'tenant', 1);
+    INSERT INTO professional_accounts (user_id, company_id, staff_id) VALUES (6, 1, ${staff.id});`);
+  const token = await signToken(secret, 6, 0);
+  const headers = { cookie: `__Host-youturno=${token.jwt}`, "x-csrf-token": token.csrf };
+  const own = await request("GET", "/api/professional/photo", undefined, 0, headers);
+  assert.equal(own.status, 200); assert.deepEqual(Buffer.from(await own.arrayBuffer()), png);
+  assert.equal((await request("GET", "/api/staff", undefined, 0, headers)).status, 403);
+  assert.equal((await request("GET", staff.photo_url, undefined, 0, headers)).status, 403);
+  assert.equal((await request("PUT", path, { photo: null }, 0, headers)).status, 403);
+  assert.equal((await request("PUT", "/api/professional/photo", {}, 0, headers)).status, 403);
+  const agenda = await (await request("GET", "/api/professional/agenda?date=2030-01-01", undefined, 0, headers)).json();
+  assert.match(agenda.staff.photo_url, /^\/api\/professional\/photo\?v=/);
+  assert.deepEqual(Object.keys(agenda.staff).sort(), ["effective_hours", "name", "photo_url"]);
+  db.exec(`UPDATE staff SET active = 0 WHERE id = ${staff.id}`);
+  assert.equal((await request("GET", "/api/professional/photo", undefined, 0, headers)).status, 403);
+});
+
+test("portrait additive schema repeats without changing prior data and enforces ownership and cascade", async (t) => {
+  const { db, request } = await harness(t);
+  await request("POST", "/api/staff", { name: "Fixture professional" });
+  db.exec("DROP TABLE staff_photos");
+  const prior = db.prepare("SELECT * FROM staff").all();
+  db.exec(schema); db.exec(schema);
+  assert.deepEqual(db.prepare("SELECT * FROM staff").all(), prior);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM staff_photos").get()?.n, 0);
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  const id = Number(prior[0].id);
+  assert.throws(() => db.prepare("INSERT INTO staff_photos VALUES (?, 2, ?, 'image/png', 'test')").run(id, png), /staff photo must belong to company/);
+  assert.equal((await request("PUT", `/api/staff/${id}`, { photo: portrait })).status, 200);
+  assert.equal((await request("DELETE", `/api/staff/${id}`, {})).status, 200);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM staff_photos").get()?.n, 0);
+});
+
 test("appearance defaults old rows, atomically saves public design and preserves profile, hours, logo and other tenants", async (t) => {
   const { db, request } = await harness(t);
   const initial = await (await request("GET", "/api/company/appearance")).json();

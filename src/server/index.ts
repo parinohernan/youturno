@@ -3,6 +3,7 @@ import { query, get, run } from "./db.js";
 import { safeSocialUrl } from "../shared/social-links.js";
 import { contactPhone } from "../shared/contact-phone.js";
 import { boundedBody, BodyTooLarge, MAX_LOGO_BYTES, validLogo } from "./company-logo.js";
+import { decodeStaffPhoto, MAX_STAFF_BODY, staffPhotoUrl } from "./staff-photo.js";
 import { appearanceError, readAppearance, isColor } from "../shared/booking-appearance.js";
 import { findConflicts, describeConflicts, toMinutes, publicStarts, bookingFloor, minutesToTime, parseBusinessHours, windowsOnDate, effectiveWindows, effectiveWeeklyHours, fitsWindows, normalizeHours, type Busy, type SchedulingPolicy } from "./scheduling.js";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
@@ -78,6 +79,7 @@ app.use("/api/*", async (c, next) => {
   if (mutation && !safeEqual(c.req.header("x-csrf-token") || "", claims.csrf)) return c.json({ error: "Token de seguridad inválido" }, 403);
   if (path === "/api/auth/session" || path === "/api/auth/logout") return next();
   if (actor.role === "professional") {
+    if (path === "/api/professional/photo" && mutation) return c.json({ error: "Acceso denegado" }, 403);
     if (!path.startsWith("/api/professional/")) return c.json({ error: "Acceso denegado" }, 403);
     return next();
   }
@@ -91,6 +93,16 @@ app.use("/api/*", async (c, next) => {
     return next();
   }
   if (actor.role !== "tenant" || actor.company_status !== "active") return c.json({ error: "Empresa pendiente o inactiva" }, 403);
+  if ((path === "/api/staff" && c.req.method === "POST") || (/^\/api\/staff\/[^/]+$/.test(path) && c.req.method === "PUT")) {
+    if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
+    try {
+      const bytes = await boundedBody(c.req.raw, MAX_STAFF_BODY);
+      c.req.raw = new Request(c.req.url, { method: c.req.method, headers: c.req.raw.headers, body: bytes });
+      await c.req.json(); // Cache bounded JSON for OpenAPI validation; malformed bodies fail before mutations.
+    } catch (error) {
+      return c.json({ error: error instanceof BodyTooLarge ? "La ficha supera el tamaño máximo permitido" : "No se pudo leer la ficha" }, error instanceof BodyTooLarge ? 413 : 400);
+    }
+  }
   await next();
 });
 
@@ -174,7 +186,7 @@ app.get("/api/professional/agenda", async (c) => {
   const member = await get<{ name: string; working_hours: string | null; business_hours: string }>(`SELECT s.name, s.working_hours, co.business_hours
     FROM staff s JOIN companies co ON co.id = ? WHERE s.id = ?`, [actor.company_id, actor.staff_id]);
   return c.json({ appointments, upcoming, cursor: nextCursor, new_booking_ids: alerts.map((row) => row.id),
-    staff: member ? { name: member.name, effective_hours: Object.fromEntries(Object.entries(
+    staff: member ? { name: member.name, photo_url: (await photoUrl(actor.company_id!, actor.staff_id!))?.replace(`/api/staff/${actor.staff_id}/photo`, "/api/professional/photo") ?? null, effective_hours: Object.fromEntries(Object.entries(
       effectiveWeeklyHours(parseBusinessHours(member.business_hours), member.working_hours)).map(([day, windows]) =>
       [day, windows.map((window) => [minutesToTime(window.start), minutesToTime(window.end)])])) } : null });
 });
@@ -525,6 +537,7 @@ const StaffHoursSchema = BusinessHoursSchema.refine((value) => normalizeHours(va
 const SchedulingModeSchema = z.enum(["consecutive", "fixed", "service_duration"]);
 const SchedulingIntervalSchema = z.number().int().min(1).max(240);
 const StaffSchema = z.object({
+  photo_url: z.string().nullable().optional(),
   access_enabled: z.number().int().optional(),
   id: z.number().int(),
   name: z.string(),
@@ -1386,6 +1399,13 @@ app.openapi(deleteClient, async (c) => {
 const ServiceIdsSchema = z.array(z.number().int().positive()).max(500)
   .refine((ids) => new Set(ids).size === ids.length, "Duplicate service IDs");
 
+const StaffPhotoInput = z.object({ mime: z.enum(["image/png", "image/jpeg"]), data: z.string().max(Math.ceil(MAX_LOGO_BYTES / 3) * 4) }).strict().nullable().optional();
+
+async function photoUrl(companyId: number, staffId: number, slug?: string) {
+  const photo = await get<{ revision: string }>("SELECT revision FROM staff_photos WHERE company_id = ? AND staff_id = ?", [companyId, staffId]);
+  return staffPhotoUrl(staffId, photo?.revision, slug);
+}
+
 async function assignedServices(companyId: number, staffId: number): Promise<number[]> {
   const rows = await query<{ service_id: number }>(
     "SELECT service_id FROM staff_services WHERE company_id = ? AND staff_id = ? ORDER BY service_id", [companyId, staffId]);
@@ -1423,6 +1443,7 @@ app.openapi(listStaff, async (c) => {
     [tenant(c)],
   );
   return c.json({ staff: await Promise.all(staff.map(async (member) => ({ ...member,
+    photo_url: await photoUrl(tenant(c), member.id),
     service_ids: await assignedServices(tenant(c), member.id),
     working_hours: member.working_hours ? JSON.parse(String(member.working_hours)) : null }))) }, 200);
 });
@@ -1459,6 +1480,7 @@ const createStaff = createRoute({
       scheduling_mode: SchedulingModeSchema.optional(),
       scheduling_interval: SchedulingIntervalSchema.optional(),
       service_ids: ServiceIdsSchema.optional(),
+      photo: StaffPhotoInput,
     }).strict() } } },
   },
   responses: { 201: { description: "Created", content: { "application/json": { schema: z.object({ staff: StaffSchema }) } } }, 400: { description: "Invalid service assignment", content: { "application/json": { schema: ErrorSchema } } } },
@@ -1466,6 +1488,8 @@ const createStaff = createRoute({
 
 app.openapi(createStaff, async (c) => {
   const body = c.req.valid("json");
+  const photo = body.photo ? decodeStaffPhoto(body.photo) : null;
+  if (body.photo && !photo) return c.json({ error: "Imagen inválida. Use PNG o JPEG de hasta 512 KB y 4096 × 4096 píxeles." }, 400);
   if (!(await validServiceAssignments(c, body.service_ids))) return c.json({ error: "Servicio no encontrado en la empresa" }, 400);
   const db = c.env.DB;
   let result;
@@ -1474,6 +1498,9 @@ app.openapi(createStaff, async (c) => {
       db.prepare("INSERT INTO staff (name, email, phone, title, color, working_hours, scheduling_mode, scheduling_interval) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(body.name, body.email || "", body.phone || "", body.title || "", body.color || "#7c3aed", body.working_hours == null ? null : JSON.stringify(body.working_hours), body.scheduling_mode ?? "fixed", body.scheduling_interval ?? 30),
       db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('staff', last_insert_rowid(), ?)").bind(tenant(c)),
+      ...(photo && body.photo ? [db.prepare(`INSERT INTO staff_photos (company_id, staff_id, bytes, content_type, revision)
+        SELECT ?, resource_id, ?, ?, ? FROM tenant_ownership WHERE rowid = last_insert_rowid() AND resource_type = 'staff' AND company_id = ?`)
+        .bind(tenant(c), photo, body.photo.mime, crypto.randomUUID(), tenant(c))] : []),
       // One INSERT reads the ownership rowid before any mapping can change it.
       db.prepare(`INSERT INTO staff_services (company_id, staff_id, service_id)
         SELECT ?, o.resource_id, j.value FROM tenant_ownership o, json_each(?) j
@@ -1486,7 +1513,7 @@ app.openapi(createStaff, async (c) => {
   }
   const id = Number((result[0].meta as { last_row_id?: number }).last_row_id);
   const staff = (await get<StoredStaff>("SELECT * FROM staff WHERE id = ?", [id]))!;
-  return c.json({ staff: { ...staff, service_ids: await assignedServices(tenant(c), id), working_hours: staff.working_hours ? JSON.parse(staff.working_hours) : null } }, 201);
+  return c.json({ staff: { ...staff, photo_url: await photoUrl(tenant(c), id), service_ids: await assignedServices(tenant(c), id), working_hours: staff.working_hours ? JSON.parse(staff.working_hours) : null } }, 201);
 });
 
 const updateStaff = createRoute({
@@ -1502,6 +1529,7 @@ const updateStaff = createRoute({
       color: z.string().optional(),
       active: z.number().int().optional(),
       professional_password: z.string().max(1024).refine((value) => value === "" || value.length >= 12, "Minimum 12 characters").optional(),
+      photo: StaffPhotoInput,
       working_hours: StaffHoursSchema.optional(),
       scheduling_mode: SchedulingModeSchema.optional(),
       scheduling_interval: SchedulingIntervalSchema.optional(),
@@ -1516,6 +1544,8 @@ app.openapi(updateStaff, async (c) => {
   if (!(await owns(c, "staff", id))) return c.json({ error: "No encontrado" }, 404);
   const body = c.req.valid("json");
   const member = await get<{ email: string | null; active: number }>("SELECT email, active FROM staff WHERE id = ?", [id]);
+  const photo = body.photo ? decodeStaffPhoto(body.photo) : null;
+  if (body.photo && !photo) return c.json({ error: "Imagen inválida. Use PNG o JPEG de hasta 512 KB y 4096 × 4096 píxeles." }, 400);
   if (!member) return c.json({ error: "No encontrado" }, 404);
   const linked = await get<{ id: number; role: string; company_id: number; email: string; session_version: number }>(`SELECT u.id, u.role, u.company_id, u.email, u.session_version FROM professional_accounts pa
     JOIN users u ON u.id = pa.user_id WHERE pa.staff_id = ? AND pa.company_id = ?`, [id, tenant(c)]);
@@ -1533,7 +1563,7 @@ app.openapi(updateStaff, async (c) => {
   const params: (string | number | null)[] = [];
   if (!(await validServiceAssignments(c, body.service_ids))) return c.json({ error: "Servicio no encontrado en la empresa" }, 400);
   for (const [key, val] of Object.entries(body)) {
-    if (key !== "service_ids" && key !== "professional_password" && val !== undefined) {
+    if (key !== "service_ids" && key !== "professional_password" && key !== "photo" && val !== undefined) {
       sets.push(`${key} = ?`);
       params.push(key === "working_hours" && val !== null ? JSON.stringify(val) : val as string | number | null);
     }
@@ -1576,6 +1606,13 @@ app.openapi(updateStaff, async (c) => {
     statements.push(db.prepare("DELETE FROM staff_services WHERE company_id = ? AND staff_id = ?").bind(tenant(c), id));
     statements.push(db.prepare(`INSERT INTO staff_services (company_id, staff_id, service_id)
       SELECT ?, ?, value FROM json_each(?)`).bind(tenant(c), Number(id), JSON.stringify(body.service_ids)));
+  }
+  if (body.photo === null) {
+    statements.push(db.prepare("DELETE FROM staff_photos WHERE staff_id = ? AND company_id = ?").bind(id, tenant(c)));
+  } else if (body.photo && photo) {
+    statements.push(db.prepare(`INSERT INTO staff_photos (staff_id, company_id, bytes, content_type, revision) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(staff_id) DO UPDATE SET bytes = excluded.bytes, content_type = excluded.content_type, revision = excluded.revision`)
+      .bind(id, tenant(c), photo, body.photo.mime, crypto.randomUUID()));
   }
   if (statements.length) {
     try { await db.batch(statements); }
@@ -2021,6 +2058,22 @@ function logoResponse(logo: StoredLogo | undefined) {
 }
 app.get("/api/company/logo", async (c) => logoResponse(await get<StoredLogo>(
   "SELECT bytes, content_type FROM company_logos WHERE company_id = ?", [tenant(c)])));
+
+app.get("/api/staff/:id/photo", async (c) => logoResponse(await get<StoredLogo>(
+  `SELECT p.bytes, p.content_type FROM staff_photos p JOIN tenant_ownership o
+   ON o.resource_type = 'staff' AND o.resource_id = p.staff_id AND o.company_id = p.company_id
+   WHERE p.staff_id = ? AND p.company_id = ?`, [c.req.param("id"), tenant(c)])));
+app.get("/api/professional/photo", async (c) => {
+  const actor = c.get("actor");
+  return logoResponse(await get<StoredLogo>(`SELECT p.bytes, p.content_type FROM staff_photos p
+    JOIN staff s ON s.id = p.staff_id JOIN tenant_ownership o ON o.resource_type = 'staff' AND o.resource_id = s.id AND o.company_id = p.company_id
+    WHERE p.staff_id = ? AND p.company_id = ? AND s.active = 1`, [actor.staff_id, actor.company_id]));
+});
+// Public portraits deliberately follow the overview's active-company/active-staff policy.
+app.get("/api/public/:slug/staff/:id/photo", async (c) => logoResponse(await get<StoredLogo>(
+  `SELECT p.bytes, p.content_type FROM staff_photos p JOIN companies co ON co.id = p.company_id
+   JOIN staff s ON s.id = p.staff_id JOIN tenant_ownership o ON o.resource_type = 'staff' AND o.resource_id = s.id AND o.company_id = co.id
+   WHERE co.slug = ? AND co.status = 'active' AND s.active = 1 AND s.id = ?`, [c.req.param("slug"), c.req.param("id")])));
 app.get("/api/public/:slug/logo", async (c) => logoResponse(await get<StoredLogo>(
   `SELECT l.bytes, l.content_type FROM company_logos l JOIN companies co ON co.id = l.company_id
    WHERE co.slug = ? AND co.status = 'active'`, [c.req.param("slug")])));
@@ -2088,7 +2141,7 @@ const publicOverview = createRoute({
           description: z.string(), address: z.string(), phone: z.string(), public_email: z.string(), website: z.string(), social_links: socialLinksInput, logo_url: z.string().nullable(),
           appearance: appearanceInput, cover_url: z.string().nullable() }),
         services: z.array(z.object({ id: z.number().int(), name: z.string(), duration: z.number().int(), price: z.number() })),
-        staff: z.array(z.object({ id: z.number().int(), name: z.string(), title: z.string(), color: z.string(), service_ids: z.array(z.number().int()), effective_hours: BusinessHoursSchema })),
+        staff: z.array(z.object({ id: z.number().int(), name: z.string(), title: z.string(), color: z.string(), photo_url: z.string().nullable(), service_ids: z.array(z.number().int()), effective_hours: BusinessHoursSchema })),
         google_sign_in: z.boolean(),
       }) } },
     },
@@ -2118,6 +2171,7 @@ app.openapi(publicOverview, async (c) => {
     },
     services,
     staff: await Promise.all(staff.map(async ({ working_hours, ...member }) => ({ ...member,
+      photo_url: await photoUrl(company.id, member.id, company.slug),
       effective_hours: Object.fromEntries(Object.entries(effectiveWeeklyHours(hours, working_hours)).map(([day, windows]) =>
         [day, windows.map((window) => [minutesToTime(window.start), minutesToTime(window.end)])])),
       service_ids: (await assignedServices(company.id, member.id)).filter((id) => services.some((service) => service.id === id)) }))),

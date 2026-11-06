@@ -61,8 +61,8 @@ export interface AppContextValue {
 
   // Staff
   staffMembers: Staff[];
-  addStaff: (data: Partial<Staff>) => Promise<void>;
-  updateStaff: (id: number, data: Partial<Staff> & { professional_password?: string }) => Promise<void>;
+  addStaff: (data: Partial<Staff> & { photo?: { mime: "image/png" | "image/jpeg"; data: string } | null }) => Promise<void>;
+  updateStaff: (id: number, data: Partial<Staff> & { professional_password?: string; photo?: { mime: "image/png" | "image/jpeg"; data: string } | null }) => Promise<void>;
   deleteStaff: (id: number) => Promise<void>;
 
   // Services

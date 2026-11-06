@@ -631,8 +631,8 @@ test("public overview answers only for active companies and only with their data
       fri: [["09:00", "18:00"]], sat: [["09:00", "18:00"]], sun: [] } });
   assert.deepEqual(overview.services, [{ id: 1, name: "Acme haircut", duration: 60, price: 40 }],
     "inactive services and other companies' services stay hidden");
-  assert.deepEqual(overview.staff, [{ id: 1, name: "Ana", title: "Senior", color: "#111111", service_ids: [1], effective_hours: overview.company.business_hours },
-    { id: 2, name: "Ben", title: "Jr", color: "#222222", service_ids: [1], effective_hours: overview.company.business_hours }], "inactive staff and other companies' staff stay hidden");
+  assert.deepEqual(overview.staff, [{ id: 1, name: "Ana", title: "Senior", color: "#111111", photo_url: null, service_ids: [1], effective_hours: overview.company.business_hours },
+    { id: 2, name: "Ben", title: "Jr", color: "#222222", photo_url: null, service_ids: [1], effective_hours: overview.company.business_hours }], "inactive staff and other companies' staff stay hidden");
   db.exec("UPDATE companies SET status = 'disabled' WHERE id = 1");
   assert.equal((await request("GET", "/api/public/acme/overview")).status, 404);
   assert.equal(db.prepare("SELECT status FROM companies WHERE slug = 'acme'").get()?.status, "disabled");
@@ -650,7 +650,7 @@ test("public effective schedules inherit missing days, preserve closure and clip
     tue: [["10:00", "15:00"]], wed: [], thu: [], fri: [], sat: [] });
   assert.deepEqual(ben.effective_hours, response.body.company.business_hours, "SQL null inherits the whole week");
   assert.deepEqual(ana.service_ids, [1], "inactive assigned services are not publicly eligible");
-  assert.deepEqual(Object.keys(ana).sort(), ["id", "name", "title", "color", "service_ids", "effective_hours"].sort());
+  assert.deepEqual(Object.keys(ana).sort(), ["id", "name", "title", "color", "photo_url", "service_ids", "effective_hours"].sort());
   assert.ok(!JSON.stringify(response.body).includes("private"));
   db.exec("UPDATE staff SET active = 0 WHERE id = 2");
   assert.deepEqual((await request("GET", "/api/public/acme/overview")).body.staff.map((member: any) => member.id), [1]);

@@ -6,13 +6,14 @@ import { actionable, appointmentDuration, bookingUpdates, chronological, nextApp
 import * as Dialog from "@radix-ui/react-dialog";
 import { dayIntervals } from "./weekly-hours-editor";
 import type { WeeklyHours } from "../types";
+import { ProfessionalAvatar } from "./professional-avatar";
 
 type Booking = AppointmentSnapshot & { id: number; identifier: string; client_name: string | null; client_phone: string | null;
   client_email: string | null; notes: string; total_price: number;
   services?: { service_name: string; duration: number; price: number }[];
   notes_history?: { content: string; created_at: string }[];
   history?: { action: string; old_date: string; old_start: string; new_date: string; new_start: string; created_at: string }[] };
-type Agenda = { appointments: Booking[]; upcoming: Booking[]; cursor: number; new_booking_ids: number[]; staff: { name: string; effective_hours: WeeklyHours } | null };
+type Agenda = { appointments: Booking[]; upcoming: Booking[]; cursor: number; new_booking_ids: number[]; staff: { name: string; photo_url?: string | null; effective_hours: WeeklyHours } | null };
 
 export function ProfessionalPortal({ companyName, logout }: { companyName: string | null; logout: () => Promise<void> }) {
   const [date, setDate] = useState(today());
@@ -142,7 +143,7 @@ export function ProfessionalPortal({ companyName, logout }: { companyName: strin
     <header className="pa-header"><div className="pa-context"><span className="pa-brand">youturno <span aria-hidden="true">/</span> <small>Profesionales</small></span><p>{companyName || "Su espacio profesional"}</p></div>
       <button className="pa-quiet" disabled={busy} onClick={logout}>Salir</button></header>
     <div className="pa-workspace">
-      <div className="pa-heading"><div><p className="pa-eyebrow">{agenda?.staff?.name || "Espacio de trabajo"}</p><h1>Mi agenda<span aria-hidden="true">.</span></h1></div><span className="pa-zone">UTC</span></div>
+      <div className="pa-heading"><div><div className="pa-identity"><ProfessionalAvatar src={agenda?.staff?.photo_url} eager /><p className="pa-eyebrow">{agenda?.staff?.name || "Espacio de trabajo"}</p></div><h1>Mi agenda<span aria-hidden="true">.</span></h1></div><span className="pa-zone">UTC</span></div>
       <div className="pa-sync"><p role="status">{offline ? "Sin conexión · los datos pueden estar desactualizados." : error ? "Actualización pendiente" : updated ? `Actualizado ${updated}` : "Conectando con su agenda…"}</p><button className="pa-quiet" disabled={busy || offline} onClick={() => setRefresh(value => value + 1)}>Actualizar</button></div>
       {alerts > 0 && <div role="status" className="pa-notice"><p>{alerts} {alerts === 1 ? "nuevo turno en su agenda" : "nuevos turnos en su agenda"}.</p><button onClick={() => setAlerts(0)}>Entendido</button></div>}
       {error && <p role="alert" className="pa-notice pa-error">{error}</p>}

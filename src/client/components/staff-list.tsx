@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { CreateStaff } from "./create-staff";
 import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 import type { Staff } from "../types";
+import { ProfessionalAvatar } from "./professional-avatar";
 
 export function StaffList() {
   const { staffMembers, deleteStaff, updateStaff } = useApp();
@@ -37,9 +38,7 @@ export function StaffList() {
             {staffMembers.map((s) => (
               <div key={s.id} className="p-4">
                 <div className="flex items-start gap-3">
-                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-base font-bold text-white" style={{ backgroundColor: s.color }}>
-                    {s.name.charAt(0).toUpperCase()}
-                  </div>
+                  <ProfessionalAvatar src={s.photo_url} />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <h2 className="font-semibold">{s.name}</h2>
@@ -92,9 +91,7 @@ export function StaffList() {
                   <TableRow key={s.id}>
                     <TableCell>
                       <div className="flex items-center gap-3">
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white" style={{ backgroundColor: s.color }}>
-                          {s.name.charAt(0).toUpperCase()}
-                        </div>
+                        <ProfessionalAvatar src={s.photo_url} />
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="font-medium">{s.name}</span>

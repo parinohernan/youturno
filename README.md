@@ -65,9 +65,19 @@ These commands support **Wrangler local D1 only**, including a VPS running that 
 
 The upgrade adds empty `professional_accounts` and `professional_appointment_changes` tables and guards. It does not rebuild `users`, change its role CHECK, alter existing appointments, create users, or restrict existing administrators. Reapplying is safe. Verify existing row counts and `PRAGMA foreign_key_check` before and after. Backups include private customer/authentication data: keep them private and do not attach them to reports.
 
-1. The company administrator identifies the existing active professional's staff ID (the ID in their `/staff/{id}` API record) and supplies it to the platform operator. Professional and company IDs must match; inactive or cross-company assignments are rejected.
-2. In the existing platform **Crear cuenta** form, select the company, enter that staff ID, an individual email, and a password agreed privately with the account holder (minimum 12 characters). Confirm the existing additional-account agreement. Blank staff ID retains the existing company-administrator provisioning behavior; there is no public signup or shared/default password.
-3. The professional uses standard staff login and receives **Mi agenda**, regardless of the private URL opened. No company-wide loader/navigation is mounted. Company administrators retain their existing management screens. This release provisions new restricted accounts; it does not provide a UI to convert or rebind an existing administrator. Disable the linked staff member or revoke the user's session server-side to remove access. Deleted staff leave a denied restriction, never an administrator account.
+1. The company administrator opens **Equipo → Editar** for an active professional and enters an individual email and a privately agreed password (12–1024 characters) under **Acceso al portal profesional**. Saving creates the restricted access atomically with the staff fields; platform **Crear cuenta** creates company administrators only.
+2. Leave the password blank to keep it. Changing the password or linked email closes previous professional sessions; the linked email cannot be cleared or shared with another account. No shared/default passwords or public signup are provided.
+3. Share `/profesionales/login`. The professional receives **Mi agenda**, regardless of the private URL opened; no company-wide loader/navigation is mounted. Existing administrators cannot be converted or rebound here. Disable the linked staff member to remove access. Deleted staff leave a denied restriction, never an administrator account.
+
+### Professional portraits
+
+In **Equipo → Agregar integrante / Editar**, choose, replace or remove the optional **Foto del profesional**, then save the staff form. The local preview does not publish anything; cancel discards the draft. Photo, staff fields, services, hours and any professional credential change commit together. Omitting `photo` in an API update preserves it; `photo: null` explicitly removes it.
+
+Only PNG/JPEG files up to **512 KiB** and **4096 × 4096 pixels** are accepted. Streaming request limits, MIME/signature and dimension checks also run on the server. The additive `staff_photos` table stores bounded BLOBs; normal staff/overview responses return only a versioned URL, never image bytes. Run `pnpm migrate:local` to preview, then `pnpm migrate:local --apply --backup /absolute/private/path/new-portrait-backup.sql` against Wrangler **local** D1 before using the new API. Follow the stop/backup/restart and VPS operator procedure above, not `schema.sql` alone or `--remote`. Existing staff retain all data and initially have no image.
+
+Portraits appear in Equipo, public professional selection and the professional's own agenda. Missing or failed images use a neutral human silhouette. Public image reads intentionally follow the overview policy: active company and active owned staff only. Company administrators can change only their own staff's photos; professionals can read only their own private photo and cannot edit it. Portrait responses contain no contact/account metadata. Company logos and booking covers are unchanged.
+
+### Professional agenda behavior
 
 | Behavior | Boundary |
 |---|---|

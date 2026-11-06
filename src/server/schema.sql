@@ -602,3 +602,18 @@ CREATE INDEX IF NOT EXISTS idx_blocked_slots_date ON blocked_slots(blocked_date)
 CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_services_category ON services(category);
+-- Optional professional portraits. No existing staff or accounts are modified.
+CREATE TABLE IF NOT EXISTS staff_photos (
+  staff_id INTEGER PRIMARY KEY REFERENCES staff(id) ON DELETE CASCADE,
+  company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  bytes BLOB NOT NULL CHECK (length(bytes) BETWEEN 1 AND 524288),
+  content_type TEXT NOT NULL CHECK (content_type IN ('image/png', 'image/jpeg')),
+  revision TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TRIGGER IF NOT EXISTS staff_photo_owner_insert BEFORE INSERT ON staff_photos
+WHEN NOT EXISTS (SELECT 1 FROM tenant_ownership WHERE resource_type = 'staff' AND resource_id = NEW.staff_id AND company_id = NEW.company_id)
+BEGIN SELECT RAISE(ABORT, 'staff photo must belong to company'); END;
+CREATE TRIGGER IF NOT EXISTS staff_photo_owner_update BEFORE UPDATE ON staff_photos
+WHEN NOT EXISTS (SELECT 1 FROM tenant_ownership WHERE resource_type = 'staff' AND resource_id = NEW.staff_id AND company_id = NEW.company_id)
+BEGIN SELECT RAISE(ABORT, 'staff photo must belong to company'); END;

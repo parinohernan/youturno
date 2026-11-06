@@ -21,13 +21,14 @@ import { compatibleSelection, chooseService, chooseStaff } from "../lib/booking-
 import { bookingHours, type ScheduledStaff } from "../lib/booking-hours";
 import { CompanyPublicDetails } from "./company-public-details";
 import { BookingPageFrame } from "./booking-page-frame";
+import { ProfessionalAvatar } from "./professional-avatar";
 import { bookingDraftKey, bookingEndTime, bookingStep, readBookingDraft, validBookingService, type BookingStep } from "../lib/booking-wizard";
 
 export interface PublicOverview {
   google_sign_in: boolean;
   company: import("../types").CompanyProfile & { slug: string };
   services: { id: number; name: string; duration: number; price: number }[];
-  staff: (ScheduledStaff & { name: string; title: string; color: string })[];
+  staff: (ScheduledStaff & { name: string; title: string; color: string; photo_url?: string | null })[];
 }
 
 interface CustomerSession {
@@ -398,8 +399,8 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
                     className={cn(btnChip, staffId === member.id && "border-primary bg-primary text-primary-foreground")}
                     onClick={() => selectStaff(member.id)}
                   >
-                    <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: member.color }} />
-                    <span className="min-w-0">{member.name}</span>
+                    <ProfessionalAvatar src={member.photo_url} />
+                    <span className="min-w-0 [overflow-wrap:anywhere]">{member.name}</span>
                   </button>
                 ))}
               </div>
