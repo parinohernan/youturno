@@ -80,12 +80,36 @@ test("profile GET/PUT derives tenant and updates public fields and session name 
   const overview = await (await request("GET", "/api/public/one/overview", undefined, 0)).json();
   assert.equal(overview.company.website, "https://example.test/salon");
   assert.equal(overview.company.name, "Updated salon");
-  assert.deepEqual(Object.keys(overview.company).sort(), ["name", "slug", "description", "address", "phone", "public_email", "website", "social_links", "logo_url", "business_hours", "appearance", "cover_url"].sort());
+  assert.deepEqual(Object.keys(overview.company).sort(), ["name", "slug", "description", "address", "latitude", "longitude", "phone", "public_email", "website", "social_links", "logo_url", "business_hours", "appearance", "cover_url"].sort());
   assert.ok(!JSON.stringify(overview).includes("private-one"));
   assert.equal((await request("PUT", "/api/company/profile", { name: "Clear optional" })).status, 200);
   assert.equal(db.prepare("SELECT public_email FROM companies WHERE id = 1").get()?.public_email, "contact@example.test");
   assert.equal((await request("PUT", "/api/company/profile", { public_email: " " })).status, 200);
   assert.equal(db.prepare("SELECT public_email FROM companies WHERE id = 1").get()?.public_email, "");
+});
+
+test("profile location persists as a pair, preserves omissions, clears together and rejects incomplete coordinates", async (t) => {
+  const { db, request } = await harness(t);
+  assert.equal((await request("PUT", "/api/company/profile", { latitude: -34.6, longitude: -58.38 })).status, 200);
+  assert.deepEqual({ ...db.prepare("SELECT latitude, longitude FROM companies WHERE id = 1").get() },
+    { latitude: -34.6, longitude: -58.38 });
+  let profile = await (await request("GET", "/api/company/profile")).json();
+  let overview = await (await request("GET", "/api/public/one/overview", undefined, 0)).json();
+  assert.equal(profile.latitude, -34.6); assert.equal(profile.longitude, -58.38);
+  assert.equal(overview.company.latitude, -34.6); assert.equal(overview.company.longitude, -58.38);
+  assert.equal((await request("PUT", "/api/company/profile", { description: "No location change" })).status, 200);
+  for (const incomplete of [{ latitude: -33 }, { longitude: 10 }, { latitude: null }, { longitude: null },
+    { latitude: -91, longitude: 0 }, { latitude: 0, longitude: 181 }, { latitude: null, longitude: 0 }]) {
+    assert.equal((await request("PUT", "/api/company/profile", incomplete)).status, 400, JSON.stringify(incomplete));
+  }
+  assert.deepEqual({ ...db.prepare("SELECT latitude, longitude FROM companies WHERE id = 1").get() },
+    { latitude: -34.6, longitude: -58.38 });
+  assert.equal((await request("PUT", "/api/company/profile", { latitude: null, longitude: null })).status, 200);
+  profile = await (await request("GET", "/api/company/profile")).json();
+  overview = await (await request("GET", "/api/public/one/overview", undefined, 0)).json();
+  assert.equal(profile.latitude, null); assert.equal(profile.longitude, null);
+  assert.equal(overview.company.latitude, null); assert.equal(overview.company.longitude, null);
+  assert.equal((await (await request("GET", "/api/company/profile", undefined, 2)).json()).latitude, null);
 });
 
 function appearanceForm(settings: unknown = defaultAppearance, action?: string, image?: Uint8Array, mime = "image/png") {
@@ -477,7 +501,8 @@ test("profile migration is additive and repeatable, preserving hours and existin
   const db = new DatabaseSync(":memory:");
   try {
     const oldSchema = schema.replace(/^  (description|address|phone|public_email|website) TEXT NOT NULL DEFAULT '',\n/gm, "")
-      .replace("  social_links TEXT NOT NULL DEFAULT '{}',\n", "");
+      .replace("  social_links TEXT NOT NULL DEFAULT '{}',\n", "")
+      .replace("  latitude REAL,\n  longitude REAL,\n", "");
     db.exec(oldSchema);
     db.exec(`INSERT INTO companies (id, name, slug, status, business_hours) VALUES (42, 'Preserved', 'preserved', 'active', '{"mon":[]}');`);
     for (let pass = 0; pass < 2; pass++) {
@@ -487,7 +512,10 @@ test("profile migration is additive and repeatable, preserving hours and existin
       assert.equal(db.prepare("SELECT name FROM companies").get()?.name, "Preserved");
       assert.equal(db.prepare("SELECT phone FROM companies").get()?.phone, pass === 0 ? "" : "Keep me");
       assert.equal(db.prepare("SELECT social_links FROM companies").get()?.social_links, pass === 0 ? "{}" : '{"instagram":"https://instagram.com/example"}');
+      assert.deepEqual({ ...db.prepare("SELECT latitude, longitude FROM companies").get() },
+        pass === 0 ? { latitude: null, longitude: null } : { latitude: -34.6, longitude: -58.38 });
       db.exec(`UPDATE companies SET social_links = '{"instagram":"https://instagram.com/example"}'`);
+      db.exec("UPDATE companies SET latitude = -34.6, longitude = -58.38");
       db.exec("UPDATE companies SET phone = 'Keep me'");
       assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
     }

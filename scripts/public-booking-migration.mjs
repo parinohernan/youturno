@@ -12,6 +12,8 @@ export function companyUpgrade(columns) {
     !names.has("slug") ? "ALTER TABLE companies ADD COLUMN slug TEXT;" : "",
     !names.has("social_links") ? "ALTER TABLE companies ADD COLUMN social_links TEXT NOT NULL DEFAULT '{}';" : "",
     !names.has("business_hours") ? `ALTER TABLE companies ADD COLUMN business_hours TEXT NOT NULL DEFAULT '${DEFAULT_HOURS}';` : "",
+    !names.has("latitude") ? "ALTER TABLE companies ADD COLUMN latitude REAL;" : "",
+    !names.has("longitude") ? "ALTER TABLE companies ADD COLUMN longitude REAL;" : "",
     ...["description", "address", "phone", "public_email", "website"].map((field) =>
       !names.has(field) ? `ALTER TABLE companies ADD COLUMN ${field} TEXT NOT NULL DEFAULT '';` : ""),
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug);",
@@ -29,8 +31,21 @@ export function staffUpgrade(columns) {
 }
 
 export function admissionUpgrade(columns) {
-  return columns.length && !columns.some((column) => column.name === "service_id")
-    ? "ALTER TABLE public_booking_admission ADD COLUMN service_id INTEGER REFERENCES services(id);" : "";
+  if (!columns.length) return "";
+  return [!columns.some((column) => column.name === "service_id")
+    ? "ALTER TABLE public_booking_admission ADD COLUMN service_id INTEGER REFERENCES services(id);" : "",
+    !columns.some((column) => column.name === "customer_email")
+      ? "ALTER TABLE public_booking_admission ADD COLUMN customer_email TEXT;" : ""].filter(Boolean).join("\n");
+}
+
+/** Add the missing column; schema reconciliation handles existing completed history. */
+export function clientUpgrade(columns) {
+  if (!columns.length || columns.some((column) => column.name === "trust_state")) return "";
+  return `ALTER TABLE clients ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'new' CHECK (trust_state IN ('new', 'returning', 'blocked'));
+UPDATE clients SET trust_state = 'returning' WHERE EXISTS (
+  SELECT 1 FROM appointments a JOIN tenant_ownership ao ON ao.resource_type = 'appointments' AND ao.resource_id = a.id
+  JOIN tenant_ownership co ON co.resource_type = 'clients' AND co.resource_id = clients.id AND co.company_id = ao.company_id
+  WHERE a.client_id = clients.id AND a.status = 'completed');`;
 }
 
 function main() {
@@ -46,20 +61,25 @@ function main() {
   const rows = JSON.parse(wrangler("execute", "youturno-db", "--local", "--json", "--command", "PRAGMA table_info(companies)"));
   const staffRows = JSON.parse(wrangler("execute", "youturno-db", "--local", "--json", "--command", "PRAGMA table_info(staff)"));
   const admissionRows = JSON.parse(wrangler("execute", "youturno-db", "--local", "--json", "--command", "PRAGMA table_info(public_booking_admission)"));
-  const upgrade = [companyUpgrade(rows[0]?.results ?? []), staffUpgrade(staffRows[0]?.results ?? []), admissionUpgrade(admissionRows[0]?.results ?? [])].filter(Boolean).join("\n");
+  const clientRows = JSON.parse(wrangler("execute", "youturno-db", "--local", "--json", "--command", "PRAGMA table_info(clients)"));
+  const upgrade = [companyUpgrade(rows[0]?.results ?? []), staffUpgrade(staffRows[0]?.results ?? []), admissionUpgrade(admissionRows[0]?.results ?? []), clientUpgrade(clientRows[0]?.results ?? [])].filter(Boolean).join("\n");
   if (!apply) {
+    console.log("Customer trust defaults to new. Same-company completed history reconciles new to returning, including manual resets. Blocked and manual returning remain unchanged. No appointments are changed.");
     console.log(upgrade || "No existing columns require upgrade; additive schema/booking guards are still applied with --apply.");
     console.log("Additive schema includes empty staff_services and current-qualification admission guard; no assignments are backfilled.");
     console.log("Additive schema also creates company_booking_appearance (settings and optional cover BLOB); no company designs are populated. Existing rows use defaults.");
     console.log("Staff scheduling defaults to fixed/30; current policy admission guard is installed without moving appointments or changing existing settings.");
     console.log("Professional access adds empty professional_accounts and professional_appointment_changes tables plus atomic action guards; users and their role CHECK are not rebuilt, and no accounts or restrictions are created.");
     console.log("Professional portraits add an empty staff_photos table with owned staff/company foreign keys; existing staff use a neutral silhouette and no photos are populated.");
+    console.log("Customer quota counts only pending appointments with scheduled UTC end strictly after the database clock. Ongoing appointments are read-only in self-service. Existing appointments, service links and contacts are not rewritten.");
     console.log("Preview only. To apply: pnpm migrate:local --apply --backup /absolute/path/to/new-backup.sql (stop the dev server first).");
     return;
   }
   if (!args.includes("--backup") || !backup?.startsWith("/")) throw new Error("--apply requires --backup with an absolute, unused output path");
   if (existsSync(backup)) throw new Error("Backup output already exists; choose a new path");
-  wrangler("export", "youturno-db", "--local", "--output", backup);
+  const mask = process.umask(0o077);
+  try { wrangler("export", "youturno-db", "--local", "--output", backup); }
+  finally { process.umask(mask); }
   if (!statSync(backup).isFile() || statSync(backup).size === 0) throw new Error("Backup is empty or not a regular file; migration aborted");
   // Upgrade existing tables before installing guards that reference new columns.
   if (upgrade) wrangler("execute", "youturno-db", "--local", "--command", upgrade);

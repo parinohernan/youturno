@@ -22,12 +22,19 @@ after(() => mock.timers.reset());
 
 type Request = (method: string, path: string, options?: {
   body?: unknown; headers?: Record<string, string>; env?: Record<string, string>;
-}) => Promise<{ status: number; body: any; location: string | null; cookies: string[] }>;
+}) => Promise<{ status: number; body: any; location: string | null; cookies: string[]; cacheControl: string | null }>;
 
 async function harness(t: { after: (fn: () => void) => void }) {
   const { default: app } = await import(`${bundle}#${scenario++}`);
   const db = new DatabaseSync(":memory:");
   t.after(() => db.close());
+  // Both HTTP and atomic SQL share the controlled UTC clock, not the host date.
+  const clockDb = new DatabaseSync(":memory:");
+  t.after(() => clockDb.close());
+  for (const name of ["date", "datetime", "strftime", "julianday"]) {
+    db.function(name, { varargs: true }, (...args) => clockDb.prepare(`SELECT ${name}(${args.map(() => "?").join(",")}) AS value`)
+      .get(...args.map((arg) => arg === "now" ? new Date().toISOString() : arg))!.value);
+  }
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
   let batchTail = Promise.resolve();
@@ -85,7 +92,7 @@ async function harness(t: { after: (fn: () => void) => void }) {
     let body: unknown = null;
     try { body = JSON.parse(text); } catch { body = text; }
     const acknowledge = (response.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
-    return { status: response.status, body, location: response.headers.get("location"),
+    return { status: response.status, body, location: response.headers.get("location"), cacheControl: response.headers.get("cache-control"),
       cookies: acknowledge ? acknowledge.call(response.headers) : [response.headers.get("set-cookie") ?? ""].filter(Boolean) };
   };
   return { db, request, metrics, synchronizeBatches, beforeNextBatch };
@@ -149,6 +156,7 @@ test("public contact phone is required, unverified, normalized and private to th
   const book = (slug: string, body: unknown) => request("POST", `/api/public/${slug}/book`, { headers, body });
   assert.equal((await book("acme", { ...base, contact_phone: "+54 (11) 5555-0100" })).status, 201);
   assert.equal(db.prepare("SELECT phone FROM clients").get()?.phone, "+541155550100");
+  db.exec("UPDATE clients SET trust_state = 'returning'"); // Exercise repeat contact updates for an authorized returning customer.
   assert.equal((await book("acme", { ...base, start_time: "11:00", contact_phone: "020 1234 5678" })).status, 201);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM clients").get()?.n, 1);
   assert.equal(db.prepare("SELECT phone FROM clients").get()?.phone, "02012345678", "authenticated customer explicitly replaces this company's contact");
@@ -161,14 +169,21 @@ test("public contact phone is required, unverified, normalized and private to th
   assert.equal(db.prepare("SELECT phone FROM clients WHERE id = 1").get()?.phone, "02012345678", "conflict cannot partially update contact");
 });
 
-test("concurrent bookings for the same customer reuse one company client atomically", async (t) => {
+test("concurrent first bookings admit exactly one and reuse one company client atomically", async (t) => {
   const { db, request, synchronizeBatches } = await twoCompanies(t);
   const headers = { cookie: await bookingCookie() };
   synchronizeBatches(2);
   const result = await Promise.all(["10:00", "12:00"].map((start_time) => request("POST", "/api/public/acme/book", {
     headers, body: { service_id: 1, staff_id: 1, date: MONDAY, start_time, contact_phone: "+541155550100" } })));
-  assert.deepEqual(result.map((r) => r.status), [201, 201]);
+  assert.deepEqual(result.map((r) => r.status).sort(), [201, 409]);
+  assert.equal(result.find((r) => r.status === 409)?.body.code, "CUSTOMER_ACTIVE_LIMIT");
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM clients").get()?.n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments").get()?.n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointment_services").get()?.n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM tenant_ownership WHERE resource_type IN ('clients', 'appointments', 'appointment_services')").get()?.n, 3);
+  assert.equal(db.prepare("SELECT value FROM _meta WHERE key = 'appointment_counter'").get()?.value, "1");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM public_booking_admission").get()?.n, 0);
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
   assert.equal(db.prepare("SELECT COUNT(DISTINCT client_id) AS n FROM appointments").get()?.n, 1);
 });
 
@@ -200,6 +215,510 @@ async function professionalFixture(t: Parameters<typeof harness>[0]) {
     { headers: { ...headers, ...extraHeaders }, body: { expected: expected(), ...body } });
   return { ...setup, token, headers, expected, action };
 }
+
+const trustBookBody = { service_id: 1, staff_id: 1, date: MONDAY, start_time: "14:00", contact_phone: "+541155550100" };
+
+async function customerManagementFixture(t: Parameters<typeof harness>[0]) {
+  const setup = await twoCompanies(t);
+  const headers = { cookie: await bookingCookie() };
+  const created = await setup.request("POST", "/api/public/acme/book", { headers, body: trustBookBody });
+  assert.equal(created.status, 201);
+  const id = created.body.appointment.id;
+  const detail = async () => (await setup.request("GET", `/api/public/acme/appointments/${id}`, { headers })).body.appointment;
+  const action = async (body: Record<string, unknown>, version?: string) => setup.request("POST", `/api/public/acme/appointments/${id}/actions`,
+    { headers, body: { version: version ?? (await detail()).version, ...body } });
+  return { ...setup, headers, id, detail, action };
+}
+test("customer management requires CUSTOMER cookie, rejects identity selectors and hides other customers/companies", async (t) => {
+  const { request, headers, id, detail } = await customerManagementFixture(t);
+  const tenant = await signToken(secret, 1, 0);
+  for (const path of ["", `/${id}`, `/${id}/slots?date=${MONDAY}`]) {
+    assert.equal((await request("GET", `/api/public/acme/appointments${path}`)).status, 401);
+    assert.equal((await request("GET", `/api/public/acme/appointments${path}`, { headers: { cookie: `__Host-youturno=${tenant.jwt}` } })).status, 401);
+    assert.equal((await request("GET", `/api/public/acme/appointments${path}`, { headers: { cookie: `yt_book=${tenant.jwt}` } })).status, 401);
+  }
+  for (const path of [`/api/public/beauty/appointments/${id}`, "/api/public/acme/appointments/999999"]) {
+    assert.equal((await request("GET", path, { headers })).status, 404);
+    assert.equal((await request("POST", `${path}/actions`, { headers, body: { action: "cancel", version: (await detail()).version } })).status, 404);
+  }
+  const other = { cookie: await bookingCookie("other@example.test") };
+  assert.deepEqual((await request("GET", "/api/public/acme/appointments", { headers: other })).body, { appointments: [] });
+  assert.equal((await request("GET", `/api/public/acme/appointments/${id}`, { headers: other })).status, 404);
+  for (const query of ["email=client@example.test", "client_id=1", "company_id=1"])
+    assert.equal((await request("GET", `/api/public/acme/appointments?${query}`, { headers })).status, 400);
+  assert.equal((await request("GET", "/api/public/acme/appointments", { headers: { cookie: await bookingCookie(" CLIENT@EXAMPLE.TEST ") } })).body.appointments.length, 1);
+});
+test("customer list includes only upcoming pending starts, never past unresolved, private fields or terminal states", async (t) => {
+  const { db, request, headers, id } = await customerManagementFixture(t);
+  db.exec("UPDATE clients SET trust_state = 'returning', notes = 'PRIVATE CLIENT NOTE'; UPDATE appointments SET notes = 'PRIVATE BOOKING NOTE'");
+  for (const start_time of ["10:00", "11:00"]) assert.equal((await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, start_time } })).status, 201);
+  db.prepare("UPDATE appointments SET scheduled_date = '2000-01-01', status = 'in_progress' WHERE id = ?").run(id);
+  const result = await request("GET", "/api/public/acme/appointments", { headers });
+  assert.equal(result.status, 200); assert.equal(result.body.appointments.length, 2);
+  assert.ok(result.body.appointments.every((item: any) => item.id !== id));
+  for (const value of ["PRIVATE", "client@example", "+5411", "client_id", "snapshot", "notes", "staff_id"])
+    assert.ok(!JSON.stringify(result.body).includes(value), value);
+  for (const status of ["completed", "cancelled", "no_show"]) {
+    db.prepare("UPDATE appointments SET status = ?").run(status);
+    assert.deepEqual((await request("GET", "/api/public/acme/appointments", { headers })).body.appointments, []);
+  }
+});
+test("customer list and quota use UTC end boundary; ongoing and expired appointments are read-only", async (t) => {
+  const { db, request, headers, id, action } = await customerManagementFixture(t);
+  for (const status of ["booked", "confirmed", "in_progress"]) {
+    for (const [date, start, end, visible] of [
+      ["2037-10-31", "22:00", "23:59", false], ["2037-11-01", "10:00", "11:59", false],
+      ["2037-11-01", "11:00", "12:00", false], ["2037-11-01", "11:59", "12:01", true],
+      ["2037-11-01", "14:00", "15:00", true], ["2037-11-02", "00:00", "01:00", true],
+    ] as const) {
+      db.prepare("UPDATE appointments SET status = ?, scheduled_date = ?, start_time = ?, end_time = ? WHERE id = ?").run(status, date, start, end, id);
+      const list = await request("GET", "/api/public/acme/appointments", { headers });
+      assert.equal(list.body.appointments.length, visible ? 1 : 0, `${status} ${date} ${end}`);
+      assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.code, visible ? "CUSTOMER_ACTIVE_LIMIT" : null);
+      if (start === "11:59") {
+        assert.equal(list.body.appointments[0].can_cancel, false);
+        assert.equal(list.body.appointments[0].can_reschedule, false);
+        assert.equal((await action({ action: "cancel" })).status, 409);
+      }
+    }
+  }
+  db.prepare("UPDATE appointments SET status = 'confirmed', scheduled_date = '2000-01-01' WHERE id = ?").run(id);
+  assert.equal((await action({ action: "cancel" })).status, 409);
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.eligible, true);
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 201);
+  assert.equal(db.prepare("SELECT status FROM appointments WHERE id=?").get(id)?.status, "confirmed");
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+});
+test("customer cancellation frees new quota immediately without promotion, preserves history/contact and cannot reopen", async (t) => {
+  const { db, request, headers, id, action, detail } = await customerManagementFixture(t);
+  const contact = db.prepare("SELECT name,email,phone,notes FROM clients").all();
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  const version = (await detail()).version;
+  assert.equal((await action({ action: "cancel" }, version)).status, 200);
+  assert.equal((await action({ action: "cancel" }, version)).status, 409);
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "10:00" }, version)).status, 409);
+  assert.equal(db.prepare("SELECT status FROM appointments WHERE id = ?").get(id)?.status, "cancelled");
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+  assert.deepEqual(db.prepare("SELECT name,email,phone,notes FROM clients").all(), contact);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointment_services").get()?.n, 1);
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.eligible, true);
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 201);
+});
+test("customer mutations enforce same-origin JSON, strict allowlist, size and authentication", async (t) => {
+  const { request, headers, id, detail } = await customerManagementFixture(t);
+  const path = `/api/public/acme/appointments/${id}/actions`, body = { action: "cancel", version: (await detail()).version };
+  for (const extra of [{ origin: "https://evil.test" }, { origin: "" }, { "content-type": "text/plain" }])
+    assert.equal((await request("POST", path, { headers: { ...headers, ...extra }, body })).status, 403);
+  assert.equal((await request("POST", path, { body })).status, 401);
+  for (const field of ["email", "client_id", "company_id", "staff_id", "service_ids", "status", "allow_conflict"])
+    assert.equal((await request("POST", path, { headers, body: { ...body, [field]: 1 } })).status, 400, field);
+  assert.equal((await request("POST", path, { headers, body: { ...body, extra: "x".repeat(3000) } })).status, 413);
+  assert.equal((await request("POST", `${path}?email=attacker`, { headers, body })).status, 400);
+});
+test("blocked customers can manage existing appointments without unblocking; in-progress and terminal cannot mutate", async (t) => {
+  const { db, request, headers, id, action } = await customerManagementFixture(t);
+  db.exec("UPDATE clients SET trust_state = 'blocked'");
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "10:00" })).status, 200);
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.code, "CUSTOMER_BLOCKED");
+  assert.equal((await action({ action: "cancel" })).status, 200);
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "blocked");
+  for (const status of ["in_progress", "completed", "no_show", "cancelled"]) {
+    db.prepare("UPDATE appointments SET status = ? WHERE id = ?").run(status, id);
+    for (const body of [{ action: "cancel" }, { action: "reschedule", date: MONDAY, start_time: "11:00" }])
+      assert.equal((await action(body)).status, 409, status);
+  }
+});
+test("customer reschedule preserves all services, price, staff, client, identifier and whole-interval cadence, excludes self", async (t) => {
+  const { db, request, headers, id, action, detail } = await customerManagementFixture(t);
+  db.exec(`INSERT INTO services (id,name,duration,price) VALUES (4,'Second service',30,99);
+    INSERT INTO tenant_ownership VALUES ('services',4,1); INSERT INTO staff_services VALUES (1,1,4);
+    INSERT INTO appointment_services (id,appointment_id,service_id,duration,price) VALUES (2,${id},4,30,99);
+    INSERT INTO tenant_ownership VALUES ('appointment_services',2,1);
+    UPDATE appointments SET end_time='15:30',total_price=139;
+    UPDATE staff SET scheduling_mode='service_duration' WHERE id=1;`);
+  const before = { ...db.prepare("SELECT * FROM appointments WHERE id = ?").get(id) };
+  const links = db.prepare("SELECT * FROM appointment_services").all();
+  const slots = await request("GET", `/api/public/acme/appointments/${id}/slots?date=${MONDAY}`, { headers });
+  assert.equal(slots.status, 200); assert.deepEqual(slots.body.slots, ["09:00", "10:30", "12:00", "13:30", "15:00", "16:30"]);
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "10:30" })).status, 200);
+  const after = db.prepare("SELECT * FROM appointments WHERE id = ?").get(id)!;
+  for (const field of ["id", "identifier", "client_id", "staff_id", "status", "total_price", "notes", "is_recurring", "recurrence_interval"])
+    assert.equal(after[field], before[field], field);
+  assert.equal(after.end_time, "12:00"); assert.deepEqual(db.prepare("SELECT * FROM appointment_services").all(), links);
+  assert.equal((await detail()).services.length, 2);
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM customer_appointment_admission").get()?.n, 0);
+});
+test("current own time is available with self exclusion and consecutive mode chooses the first fit", async (t) => {
+  const { db, request, headers, id, action } = await customerManagementFixture(t);
+  let result = await request("GET", `/api/public/acme/appointments/${id}/slots?date=${MONDAY}`, { headers });
+  assert.ok(result.body.slots.includes("14:00"));
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "14:00" })).status, 200);
+  db.exec("UPDATE staff SET scheduling_mode='consecutive' WHERE id=1");
+  result = await request("GET", `/api/public/acme/appointments/${id}/slots?date=${MONDAY}`, { headers });
+  assert.deepEqual(result.body.slots, ["09:00"]);
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "09:00" })).status, 200);
+});
+test("customer reschedule rejects past, conflicts, inactive/unqualified service/staff and split-hour gaps", async (t) => {
+  const { db, request, headers, id, action } = await customerManagementFixture(t);
+  assert.equal((await action({ action: "reschedule", date: "2000-01-01", start_time: "10:00" })).status, 400);
+  assert.equal((await action({ action: "reschedule", date: "2037-02-30", start_time: "10:00" })).status, 400);
+  for (const [change, restore] of [
+    ["UPDATE staff SET active=0 WHERE id=1", "UPDATE staff SET active=1 WHERE id=1"],
+    ["UPDATE services SET active=0 WHERE id=1", "UPDATE services SET active=1 WHERE id=1"],
+    ["DELETE FROM staff_services WHERE staff_id=1", "INSERT INTO staff_services VALUES(1,1,1)"],
+    [`UPDATE staff SET working_hours='{"mon":[["09:00","10:00"],["12:00","18:00"]]}' WHERE id=1`, "UPDATE staff SET working_hours=NULL WHERE id=1"],
+  ]) {
+    db.exec(change);
+    assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "10:00" })).status, 409);
+    db.exec(restore);
+  }
+  db.exec(`INSERT INTO blocked_slots(id,staff_id,blocked_date,start_time,end_time,reason) VALUES(1,1,'${MONDAY}','10:00','11:00','PRIVATE');
+    INSERT INTO tenant_ownership VALUES('blocked_slots',1,1);`);
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "10:00" })).status, 409);
+  assert.equal((await request("GET", `/api/public/acme/appointments/${id}/slots?date=${MONDAY}&staff_id=2`, { headers })).status, 400);
+});
+test("cancel versus reschedule and two reschedules serialize snapshot guards without reopening", async (t) => {
+  const { db, action, detail, synchronizeBatches } = await customerManagementFixture(t);
+  const version = (await detail()).version;
+  synchronizeBatches(2);
+  const results = await Promise.all([action({ action: "cancel" }, version), action({ action: "reschedule", date: MONDAY, start_time: "10:00" }, version)]);
+  assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments").get()?.n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM customer_appointment_admission").get()?.n, 0);
+});
+test("customer atomic admission rejects stale policy/hours/services/ownership/status even after successful pre-read", async (t) => {
+  const { db, action, detail, beforeNextBatch } = await customerManagementFixture(t);
+  const version = (await detail()).version;
+  for (const [change, restore] of [
+    ["UPDATE staff SET scheduling_interval=60 WHERE id=1", "UPDATE staff SET scheduling_interval=30 WHERE id=1"],
+    ["UPDATE staff SET active=0 WHERE id=1", "UPDATE staff SET active=1 WHERE id=1"],
+    ["UPDATE services SET active=0 WHERE id=1", "UPDATE services SET active=1 WHERE id=1"],
+    ["DELETE FROM staff_services WHERE staff_id=1", "INSERT INTO staff_services VALUES(1,1,1)"],
+    [`UPDATE companies SET business_hours='{"mon":["12:00","18:00"]}' WHERE id=1`, `UPDATE companies SET business_hours='${'{"mon":["09:00","18:00"]}'}' WHERE id=1`],
+    ["UPDATE companies SET status='disabled' WHERE id=1", "UPDATE companies SET status='active' WHERE id=1"],
+    ["UPDATE clients SET email='changed@example.test'", "UPDATE clients SET email='client@example.test'"],
+    ["UPDATE appointments SET status='in_progress'", "UPDATE appointments SET status='confirmed'"],
+    ["UPDATE appointment_services SET price=123", "UPDATE appointment_services SET price=40"],
+  ]) {
+    beforeNextBatch(() => db.exec(change));
+    const result = await action({ action: "reschedule", date: MONDAY, start_time: "10:30" }, version);
+    assert.equal(result.status, 409, change);
+    assert.equal(db.prepare("SELECT start_time FROM appointments").get()?.start_time, "14:00", change);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM customer_appointment_admission").get()?.n, 0);
+    db.exec(restore);
+  }
+});
+test("customer reschedule versus another public booking has exactly one winner at the destination", async (t) => {
+  const { db, request, action, synchronizeBatches } = await customerManagementFixture(t);
+  const other = { cookie: await bookingCookie("other@example.test") };
+  synchronizeBatches(2);
+  const results = await Promise.all([action({ action: "reschedule", date: MONDAY, start_time: "10:00" }),
+    request("POST", "/api/public/acme/book", { headers: other, body: { ...trustBookBody, start_time: "10:00" } })]);
+  assert.equal(results.filter((r) => [200,201].includes(r.status)).length, 1);
+  assert.equal(results.filter((r) => r.status === 409).length, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments WHERE start_time='10:00' AND status!='cancelled'").get()?.n, 1);
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+});
+test("two customer reschedules using one snapshot admit one move, never duplicate or partially change the booking", async (t) => {
+  const { db, action, detail, synchronizeBatches } = await customerManagementFixture(t);
+  const version = (await detail()).version;
+  synchronizeBatches(2);
+  const results = await Promise.all(["10:00", "12:00"].map((start_time) => action({ action: "reschedule", date: MONDAY, start_time }, version)));
+  assert.deepEqual(results.map((r) => r.status).sort(), [200,409]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments").get()?.n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointment_services").get()?.n, 1);
+});
+test("a current block applied after customer pre-read permits only existing management and never resets trust", async (t) => {
+  const { db, request, headers, action, beforeNextBatch } = await customerManagementFixture(t);
+  beforeNextBatch(() => db.exec("UPDATE clients SET trust_state='blocked'"));
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "10:00" })).status, 200);
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "blocked");
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 403);
+  assert.equal((await action({ action: "cancel" })).status, 200);
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.code, "CUSTOMER_BLOCKED");
+});
+test("customer projection refuses corrupt cross-company staff or service references instead of disclosing names", async (t) => {
+  const { db, request, headers, id } = await customerManagementFixture(t);
+  db.exec("DELETE FROM tenant_ownership WHERE resource_type='staff' AND resource_id=1; INSERT INTO tenant_ownership VALUES('staff',1,2)");
+  assert.equal((await request("GET", `/api/public/acme/appointments/${id}`, { headers })).status, 404);
+  assert.deepEqual((await request("GET", "/api/public/acme/appointments", { headers })).body.appointments, []);
+  db.exec("DELETE FROM tenant_ownership WHERE resource_type='staff' AND resource_id=1; INSERT INTO tenant_ownership VALUES('staff',1,1)");
+  db.exec("DELETE FROM tenant_ownership WHERE resource_type='services' AND resource_id=1; INSERT INTO tenant_ownership VALUES('services',1,2)");
+  assert.equal((await request("GET", `/api/public/acme/appointments/${id}`, { headers })).status, 404);
+});
+
+test("new quota spans staff/services and future active appointments, while cancellation/no-show free it without promotion", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  const headers = { cookie: await bookingCookie() };
+  const book = (body = {}) => request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, ...body } });
+  const first = await book(); assert.equal(first.status, 201);
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+  db.exec(`INSERT INTO services (id, name, duration) VALUES (4, 'Another service', 30);
+    INSERT INTO tenant_ownership VALUES ('services', 4, 1); INSERT INTO staff_services VALUES (1, 2, 4);`);
+  for (const status of ["booked", "confirmed", "in_progress"]) {
+    db.prepare("UPDATE appointments SET status = ? WHERE id = ?").run(status, first.body.appointment.id);
+    const denied = await book({ staff_id: 2, service_id: 4 });
+    assert.equal(denied.status, 409); assert.equal(denied.body.code, "CUSTOMER_ACTIVE_LIMIT");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments").get()?.n, 1);
+  }
+  for (const status of ["cancelled", "no_show"]) {
+    db.prepare("UPDATE appointments SET status = ?").run(status);
+    assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+    assert.equal((await book({ start_time: status === "no_show" ? "15:00" : "14:00" })).status, 201);
+    assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+  }
+});
+
+test("advisory and atomic quota agree for expired, ending-now, ongoing and future pending appointments without rewriting old rows", async (t) => {
+  for (const status of ["booked", "confirmed", "in_progress", "cancelled", "no_show"]) {
+    for (const [date, start, end, pending] of [
+      ["2037-10-31", "10:00", "11:00", false], ["2037-11-01", "10:00", "11:59", false],
+      ["2037-11-01", "11:00", "12:00", false], ["2037-11-01", "11:30", "12:30", true],
+      ["2037-11-01", "14:00", "15:00", true], [MONDAY, "10:00", "11:00", true],
+    ] as const) {
+      const { db, request } = await twoCompanies(t);
+      db.exec(`INSERT INTO clients(id,name,email,phone) VALUES(1,'Fixture','client@example.test','preserved');
+        INSERT INTO tenant_ownership VALUES('clients',1,1);`);
+      db.prepare("INSERT INTO appointments(id,identifier,client_id,staff_id,status,scheduled_date,start_time,end_time) VALUES(1,'PRESERVED',1,1,?,?,?,?)").run(status,date,start,end);
+      db.exec("INSERT INTO tenant_ownership VALUES('appointments',1,1)");
+      const before = db.prepare("SELECT * FROM appointments WHERE id=1").get();
+      const headers = { cookie: await bookingCookie() };
+      const limited = pending && !["cancelled", "no_show"].includes(status);
+      const advisory = await request("GET", "/api/public/acme/eligibility", { headers });
+      assert.equal(advisory.body.eligible, !limited, `${status} ${date} ${end}`);
+      const result = await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, staff_id: 2 } });
+      assert.equal(result.status, limited ? 409 : 201, `${status} ${date} ${end}`);
+      if (limited) assert.equal(result.body.code, "CUSTOMER_ACTIVE_LIMIT");
+      assert.deepEqual(db.prepare("SELECT * FROM appointments WHERE id=1").get(), before);
+      assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id=1").get()?.trust_state, "new");
+    }
+  }
+});
+
+test("atomic customer quota rechecks time and completed history after stale HTTP reads", async (t) => {
+  const { db, request, headers, beforeNextBatch, id } = await customerManagementFixture(t);
+  beforeNextBatch(() => db.prepare("UPDATE appointments SET scheduled_date='2000-01-01' WHERE id=?").run(id));
+  const released = await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, staff_id: 2 } });
+  assert.equal(released.status, 201, "expired at admission is no longer quota");
+  beforeNextBatch(() => db.prepare("UPDATE appointments SET status='completed' WHERE id=?").run(id));
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, start_time: "16:00" } })).status, 201);
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "returning");
+  beforeNextBatch(() => db.exec("UPDATE clients SET trust_state='blocked'"));
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, start_time: "17:00" } })).status, 403);
+});
+
+test("atomic self-service rejects crossing the original start boundary after a valid detail read", async (t) => {
+  const { db, action, detail, beforeNextBatch, id } = await customerManagementFixture(t);
+  db.prepare("UPDATE appointments SET scheduled_date='2037-11-01',start_time='12:01',end_time='13:01' WHERE id=?").run(id);
+  const version = (await detail()).version;
+  beforeNextBatch(() => mock.timers.setTime(new Date("2037-11-01T12:01:00Z").getTime()));
+  try {
+    assert.equal((await action({ action: "cancel" }, version)).status, 409);
+    assert.equal(db.prepare("SELECT status FROM appointments WHERE id=?").get(id)?.status, "confirmed");
+  } finally { mock.timers.setTime(new Date("2037-11-01T12:00:00Z").getTime()); }
+});
+
+test("atomic quota expires exactly at scheduled UTC end even when advisory was limited and the browser clock was stale", async (t) => {
+  const { db, request, headers, beforeNextBatch, id } = await customerManagementFixture(t);
+  db.prepare("UPDATE appointments SET scheduled_date='2037-11-01',start_time='11:01',end_time='12:01' WHERE id=?").run(id);
+  const before = db.prepare("SELECT * FROM appointments WHERE id=?").get(id);
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  beforeNextBatch(() => mock.timers.setTime(new Date("2037-11-01T12:01:00Z").getTime()));
+  try {
+    assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 201);
+    assert.deepEqual(db.prepare("SELECT * FROM appointments WHERE id=?").get(id), before);
+    assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+  } finally { mock.timers.setTime(new Date("2037-11-01T12:00:00Z").getTime()); }
+});
+
+test("authenticated eligibility is scoped to signed normalized email/company and never public overview", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  const headers = { cookie: await bookingCookie(" Client@Example.Test ") };
+  assert.equal((await request("GET", "/api/public/acme/eligibility")).status, 401);
+  assert.equal((await request("GET", "/api/public/acme/eligibility?email=other@example.test", { headers })).status, 400);
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.eligible, true);
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 201);
+  const limited = await request("GET", "/api/public/acme/eligibility", { headers });
+  assert.equal(limited.cacheControl, "no-store");
+  assert.equal(limited.body.code, "CUSTOMER_ACTIVE_LIMIT");
+  assert.equal((await request("GET", "/api/public/beauty/eligibility", { headers })).body.eligible, true);
+  const differentProvider = { cookie: `yt_book=${await signCustomerToken(secret, { sub: "different-google-id", email: "CLIENT@example.test", name: "Changed name" })}` };
+  assert.equal((await request("POST", "/api/public/acme/book", { headers: differentProvider, body: { ...trustBookBody, staff_id: 2 } })).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  db.exec("UPDATE clients SET trust_state = 'blocked'");
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.code, "CUSTOMER_BLOCKED");
+  const denied = await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, staff_id: 2 } });
+  assert.equal(denied.status, 403); assert.equal(denied.body.code, "CUSTOMER_BLOCKED");
+  assert.equal(db.prepare("SELECT status FROM appointments").get()?.status, "confirmed", "blocking preserves existing reservations");
+  assert.equal((await request("POST", "/api/public/beauty/book", { headers, body: { ...trustBookBody, service_id: 3, staff_id: 3 } })).status, 201);
+  const overview = JSON.stringify((await request("GET", "/api/public/acme/overview", { headers })).body);
+  for (const privateValue of ["trust_state", "blocked", "client@example.test", "CUSTOMER_BLOCKED"]) assert.ok(!overview.includes(privateValue));
+  assert.equal((await request("GET", `/api/public/acme/slots?date=${MONDAY}&service_id=1`)).status, 200);
+});
+
+test("completed and mixed terminal history never consumes new quota, while returning ignores all active statuses", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  db.exec(`INSERT INTO clients (id,name,email) VALUES (1,'Fixture','client@example.test');
+    INSERT INTO tenant_ownership VALUES ('clients',1,1);
+    INSERT INTO appointments (id,identifier,client_id,status,scheduled_date) VALUES
+      (1,'APT-1',1,'completed','2000-01-01'), (2,'APT-2',1,'completed','2000-01-02'),
+      (3,'APT-3',1,'completed','2000-01-03');
+    INSERT INTO tenant_ownership VALUES ('appointments',1,1),('appointments',2,1),('appointments',3,1);`);
+  const headers = { cookie: await bookingCookie() };
+  const eligibility = () => request("GET", "/api/public/acme/eligibility", { headers });
+  assert.deepEqual((await eligibility()).body, { eligible: true, code: null, message: null }, "legacy new with all completed is eligible");
+  db.exec("UPDATE appointments SET status='cancelled' WHERE id=2; UPDATE appointments SET status='no_show' WHERE id=3");
+  assert.equal((await eligibility()).body.eligible, true, "mixed terminal history is eligible");
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 201, "atomic guard also excludes terminal history");
+  for (const status of ["booked", "confirmed", "in_progress"]) {
+    db.prepare("UPDATE appointments SET status=? WHERE status NOT IN ('completed','cancelled','no_show')").run(status);
+    db.exec("UPDATE clients SET trust_state='new'");
+    assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "returning", "completed history overrides manual new");
+    assert.equal((await eligibility()).body.eligible, true, status);
+    db.exec("UPDATE clients SET trust_state='returning'");
+    assert.equal((await eligibility()).body.eligible, true, `returning ${status}`);
+  }
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, start_time: "16:00" } })).status, 201);
+  db.exec("UPDATE clients SET trust_state='blocked'; UPDATE appointments SET status='completed'");
+  assert.equal((await eligibility()).body.code, "CUSTOMER_BLOCKED");
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "blocked");
+});
+
+test("another company's active appointment never consumes this company's new quota and corrupt ownership is rejected", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  db.exec(`INSERT INTO clients (id,name,email) VALUES (1,'First','client@example.test'),(2,'Second','client@example.test');
+    INSERT INTO tenant_ownership VALUES ('clients',1,1),('clients',2,2);
+    INSERT INTO appointments (id,identifier,client_id,status,scheduled_date,start_time,end_time) VALUES (1,'APT-1',2,'confirmed','2037-11-02','10:00','11:00'),(2,'APT-2',1,'completed','2000-01-01','10:00','11:00');
+    INSERT INTO tenant_ownership VALUES ('appointments',1,2),('appointments',2,1);`);
+  assert.throws(() => db.exec("UPDATE appointments SET client_id=1 WHERE id=1"), /appointment client must belong to company/);
+  const headers = { cookie: await bookingCookie() };
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.eligible, true);
+  assert.equal((await request("GET", "/api/public/beauty/eligibility", { headers })).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 201);
+});
+
+test("stale eligibility cannot admit newly blocked customer or leave partial state", async (t) => {
+  const { db, request, beforeNextBatch } = await twoCompanies(t);
+  db.exec(`INSERT INTO clients (id, name, email, phone) VALUES (1, 'Existing', ' CLIENT@example.test ', 'old phone');
+    INSERT INTO tenant_ownership VALUES ('clients', 1, 1);`);
+  const headers = { cookie: await bookingCookie() };
+  assert.equal((await request("GET", "/api/public/acme/eligibility", { headers })).body.eligible, true);
+  beforeNextBatch(() => db.exec("UPDATE clients SET trust_state = 'blocked' WHERE id = 1"));
+  const denied = await request("POST", "/api/public/acme/book", { headers, body: trustBookBody });
+  assert.equal(denied.status, 403); assert.equal(denied.body.code, "CUSTOMER_BLOCKED");
+  assert.equal(db.prepare("SELECT phone FROM clients").get()?.phone, "old phone");
+  for (const table of ["appointments", "appointment_services", "public_booking_admission", "_meta"]) assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM tenant_ownership WHERE resource_type = 'clients'").get()?.n, 1);
+});
+
+test("cancellation at admission frees quota; simultaneous replacements still admit just one", async (t) => {
+  const { db, request, beforeNextBatch, synchronizeBatches } = await twoCompanies(t);
+  const headers = { cookie: await bookingCookie() };
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: trustBookBody })).status, 201);
+  beforeNextBatch(() => db.exec("UPDATE appointments SET status = 'cancelled'"));
+  synchronizeBatches(2);
+  const results = await Promise.all([1, 2].map((staff_id) => request("POST", "/api/public/acme/book", { headers,
+    body: { ...trustBookBody, start_time: "16:00", staff_id } })));
+  assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
+  assert.equal(results.find((r) => r.status === 409)?.body.code, "CUSTOMER_ACTIVE_LIMIT");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments WHERE status = 'confirmed'").get()?.n, 1);
+  assert.equal(db.prepare("SELECT trust_state FROM clients").get()?.trust_state, "new");
+});
+
+test("only owned company administrators set strict trust states; manual bookings deliberately override public restrictions", async (t) => {
+  const { db, request, headers: professional } = await professionalFixture(t);
+  const token = await signToken(secret, 2, 0);
+  const headers = { cookie: `__Host-youturno=${token.jwt}`, "x-csrf-token": token.csrf };
+  const save = (body: unknown, id = 1, actorHeaders = headers) => request("PUT", `/api/clients/${id}`, { headers: actorHeaders, body });
+  for (const body of [{ trust_state: "trusted" }, { trust_state: null }, { trust_state: "returning", company_id: 2 }]) assert.equal((await save(body)).status, 400);
+  assert.equal((await save({ trust_state: "returning" }, 1, professional)).status, 403);
+  assert.equal((await save({ trust_state: "returning" }, 3)).status, 404);
+  const customerHeaders = { cookie: await bookingCookie("own@example.test") };
+  assert.equal((await save({ trust_state: "returning" })).status, 200);
+  assert.equal((await request("GET", "/api/clients/1", { headers })).body.client.trust_state, "returning");
+  assert.equal((await request("POST", "/api/public/acme/book", { headers: customerHeaders, body: trustBookBody })).status, 201);
+  assert.equal((await request("POST", "/api/public/acme/book", { headers: customerHeaders, body: { ...trustBookBody, start_time: "15:00" } })).status, 201);
+  assert.equal((await save({ trust_state: "blocked" })).status, 200);
+  const manual = await request("POST", "/api/appointments", { headers, body: { client_id: 1, staff_id: 1, scheduled_date: MONDAY, start_time: "16:00", service_ids: [1] } });
+  assert.equal(manual.status, 201);
+  assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, "blocked");
+  assert.equal((await request("PUT", "/api/clients/1", { headers: customerHeaders, body: { trust_state: "returning" } })).status, 401);
+  for (const extra of [{ trust_state: "returning" }, { status: "completed" }, { client_id: 2 }, { company_id: 2 }]) {
+    assert.equal((await request("POST", "/api/public/acme/book", { headers: customerHeaders, body: { ...trustBookBody, ...extra } })).status, 400);
+  }
+});
+
+for (const path of ["tenant", "professional"] as const) {
+  for (const initial of ["new", "blocked", "returning"]) {
+    test(`${path} completion promotes only new, never unblocks ${initial}, and completed history overrides manual reset`, async (t) => {
+      const { db, request, action } = await professionalFixture(t);
+      db.prepare("UPDATE clients SET trust_state = ? WHERE id = 1").run(initial);
+      const token = await signToken(secret, 2, 0);
+      const headers = { cookie: `__Host-youturno=${token.jwt}`, "x-csrf-token": token.csrf };
+      const complete = () => path === "professional" ? action({ action: "completed" }) : request("PUT", "/api/appointments/1", { headers, body: { status: "completed" } });
+      assert.equal((await complete()).status, 200);
+      assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, initial === "new" ? "returning" : initial);
+      assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 2").get()?.trust_state, "new");
+      db.exec("UPDATE clients SET trust_state = 'new' WHERE id = 1");
+      assert.equal((await request("GET", "/api/clients/1", { headers })).body.client.trust_state, "returning", "detail exposes the persisted normalized state");
+      assert.equal((await complete()).status, path === "professional" ? 409 : 200);
+      assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, "returning", "completed attendance is durable evidence");
+    });
+  }
+}
+
+test("rescheduling the same appointment consumes no quota and rejected professional completion cannot promote", async (t) => {
+  const { db, request, action, beforeNextBatch } = await professionalFixture(t);
+  assert.equal((await action({ action: "reschedule", date: MONDAY, start_time: "14:00", manual_contact_acknowledged: true })).status, 200);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments WHERE client_id = 1").get()?.n, 1);
+  assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, "new");
+  const headers = { cookie: await bookingCookie("own@example.test") };
+  assert.equal((await request("POST", "/api/public/acme/book", { headers, body: { ...trustBookBody, staff_id: 2 } })).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  beforeNextBatch(() => db.exec("UPDATE appointments SET status = 'cancelled' WHERE id = 1"));
+  assert.equal((await action({ action: "completed" })).status, 409);
+  assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, "new");
+});
+
+test("legacy duplicate normalized emails cannot hide blocked state or active quota", async (t) => {
+  const { db, request } = await professionalFixture(t);
+  db.exec(`INSERT INTO clients (id, name, email, trust_state) VALUES (4, 'Duplicate', ' OWN@Example.Test ', 'blocked');
+    INSERT INTO tenant_ownership VALUES ('clients', 4, 1);`);
+  const headers = { cookie: await bookingCookie("own@example.test") };
+  const book = () => request("POST", "/api/public/acme/book", { headers, body: trustBookBody });
+  assert.equal((await book()).body.code, "CUSTOMER_BLOCKED");
+  db.exec("UPDATE clients SET trust_state = 'new' WHERE id = 4; UPDATE appointments SET client_id = 4 WHERE id = 1");
+  assert.equal((await book()).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM clients").get()?.n, 4);
+});
+
+test("existing multiple active bookings are preserved and new quota frees only after all are resolved", async (t) => {
+  const { db, request } = await professionalFixture(t);
+  db.exec("UPDATE appointments SET client_id = 1 WHERE id = 2");
+  const headers = { cookie: await bookingCookie("own@example.test") };
+  const book = () => request("POST", "/api/public/acme/book", { headers, body: trustBookBody });
+  assert.equal((await book()).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM appointments WHERE client_id = 1").get()?.n, 2);
+  db.exec("UPDATE appointments SET status = 'cancelled' WHERE id = 1");
+  assert.equal((await book()).body.code, "CUSTOMER_ACTIVE_LIMIT");
+  db.exec("UPDATE appointments SET status = 'no_show' WHERE id = 2");
+  assert.equal((await book()).status, 201);
+  assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, "new");
+});
+
+test("completion promotion rolls back with failed appointment writes and requires same-company client ownership", async (t) => {
+  const { db, request, action } = await professionalFixture(t);
+  db.exec(`CREATE TRIGGER fail_test_promotion AFTER UPDATE OF trust_state ON clients
+    WHEN NEW.trust_state = 'returning' BEGIN SELECT RAISE(ABORT, 'test promotion failure'); END;`);
+  const token = await signToken(secret, 2, 0);
+  const headers = { cookie: `__Host-youturno=${token.jwt}`, "x-csrf-token": token.csrf };
+  assert.equal((await request("PUT", "/api/appointments/1", { headers, body: { status: "completed" } })).status, 500);
+  assert.equal((await action({ action: "completed" })).status, 500);
+  assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, "new");
+  assert.equal(db.prepare("SELECT status FROM appointments WHERE id = 1").get()?.status, "confirmed");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM professional_appointment_changes").get()?.n, 0);
+  db.exec("DROP TRIGGER fail_test_promotion; DELETE FROM tenant_ownership WHERE resource_type = 'clients' AND resource_id = 1; INSERT INTO tenant_ownership VALUES ('clients', 1, 2); UPDATE appointments SET status = 'completed' WHERE id = 1");
+  assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id = 1").get()?.trust_state, "new", "invalid cross-company reference must not promote");
+});
 
 test("professional sessions expose only own agenda and deny every tenant-wide route", async (t) => {
   const { db, request, headers } = await professionalFixture(t);
@@ -582,7 +1101,7 @@ test("atomic SQL and shared pure generator agree on every minute across policies
   ownCompany1(db, "blocked_slots", 1);
   const windows = [{ start: 550, end: 750 }, { start: 970, end: 1080 }];
   const busy = [{ kind: "blocked" as const, start_time: "09:23", end_time: "09:37", label: "Fixture" }];
-  const insert = db.prepare("INSERT INTO public_booking_admission VALUES ('probe', 1, 1, 1, ?, ?, ?)");
+  const insert = db.prepare("INSERT INTO public_booking_admission (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time) VALUES ('probe', 1, 1, 1, ?, ?, ?)");
   const time = (i: number) => `${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}`;
   for (const mode of ["consecutive", "fixed", "service_duration"] as SchedulingMode[]) {
     for (const duration of [10, 30, 45, 60]) {
@@ -610,11 +1129,14 @@ test("atomic consecutive admission uses the database clock ceiling and rejects p
   db.prepare("UPDATE companies SET business_hours = ? WHERE id = 1").run(JSON.stringify({ [day]: [["00:00", "23:59"]] }));
   db.exec("UPDATE staff SET scheduling_mode = 'consecutive' WHERE id = 1; UPDATE services SET duration = 1 WHERE id = 1");
   assert.throws(() => db.exec(`INSERT INTO public_booking_admission
+    (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time)
     SELECT 'past', 1, 1, 1, date('now', '-1 day'), '12:00', '12:01'`), /public booking conflict/);
   assert.throws(() => db.exec(`INSERT INTO public_booking_admission
+    (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time)
     SELECT 'later', 1, 1, 1, date('now'), strftime('%H:%M', 'now', '+2 minutes'), strftime('%H:%M', 'now', '+3 minutes')`), /public booking conflict/);
   // 'now' is stable within a SQLite statement, including all trigger steps.
   db.exec(`INSERT INTO public_booking_admission
+    (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time)
     SELECT 'ceiling', 1, 1, 1, date('now'),
       strftime('%H:%M', 'now', CASE WHEN CAST(strftime('%f', 'now') AS REAL) > 0 THEN '+1 minute' ELSE '+0 minutes' END),
       strftime('%H:%M', 'now', CASE WHEN CAST(strftime('%f', 'now') AS REAL) > 0 THEN '+2 minutes' ELSE '+1 minute' END)`);
@@ -625,7 +1147,7 @@ test("public overview answers only for active companies and only with their data
   const { db, request } = await twoCompanies(t);
   assert.equal((await request("GET", "/api/public/unknown/overview")).status, 404);
   const overview = (await request("GET", "/api/public/acme/overview")).body;
-  assert.deepEqual(overview.company, { name: "Acme", slug: "acme", description: "", address: "", phone: "", public_email: "", website: "", social_links: {}, logo_url: null,
+  assert.deepEqual(overview.company, { name: "Acme", slug: "acme", description: "", address: "", latitude: null, longitude: null, phone: "", public_email: "", website: "", social_links: {}, logo_url: null,
     appearance: { background: "#ffffff", text: "#18181b", button: "#6d28d9", welcome: "" }, cover_url: null, business_hours:
     { mon: [["09:00", "18:00"]], tue: [["09:00", "18:00"]], wed: [["09:00", "18:00"]], thu: [["09:00", "18:00"]],
       fri: [["09:00", "18:00"]], sat: [["09:00", "18:00"]], sun: [] } });
@@ -705,6 +1227,17 @@ test("customer session routes guard identity", async (t) => {
   const logout = await request("POST", "/api/auth/customer/logout", { headers: { cookie } });
   assert.equal(logout.status, 200);
   assert.ok(logout.cookies.some((value) => value.startsWith("yt_book=;")), "logout clears the booking cookie");
+  for (const name of ["yt_book", "yt_oauth"]) {
+    const expired = logout.cookies.find((value) => value.startsWith(`${name}=`));
+    assert.ok(expired, `${name} is expired`);
+    assert.match(expired, /Max-Age=0(?:;|$)/i);
+    assert.match(expired, /Path=\/(?:;|$)/i);
+    assert.match(expired, /Secure(?:;|$)/i);
+  }
+  assert.ok(logout.cookies.every((value) => value.startsWith("yt_book=") || value.startsWith("yt_oauth=")), "staff cookies are untouched");
+  assert.equal(logout.cacheControl, "no-store");
+  assert.equal((await request("POST", "/api/auth/customer/logout", { body: {}, headers: { origin: "https://foreign.invalid" } })).status, 403);
+  assert.equal((await request("POST", "/api/auth/customer/logout", { headers: { "content-type": "text/plain" } })).status, 403);
 });
 
 test("public booking creates a confirmed appointment, one client per customer and honest 409s", async (t) => {
@@ -734,6 +1267,7 @@ test("public booking creates a confirmed appointment, one client per customer an
     "the first active staff member by name got the chair");
   assert.equal(client.email, "client@example.test");
   assert.equal(client.name, "Client Name");
+  db.prepare("UPDATE clients SET trust_state = 'returning' WHERE id = ?").run(client.id);
 
   // The same Google identity reuses this company's client; Ana sits down, so Ben is picked.
   const second = await book({ service_id: 1, date: MONDAY, start_time: "10:00" });
@@ -1028,6 +1562,7 @@ test("explicit staff overrides admit only services wholly inside a company/perso
   for (const start_time of ["11:00", "17:00", "19:00"]) {
     assert.equal((await request("POST", "/api/public/acme/book", { headers: { cookie },
       body: { contact_phone: "+541155550100", service_id: 1, staff_id: 1, date: MONDAY, start_time } })).status, 201, start_time);
+    db.exec("UPDATE clients SET trust_state = 'returning'"); // Keep this test focused on personal/company hours.
   }
 });
 

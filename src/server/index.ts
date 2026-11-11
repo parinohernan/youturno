@@ -2,6 +2,9 @@ import { createApp, createRoute, z } from "@clawnify/app";
 import { query, get, run } from "./db.js";
 import { safeSocialUrl } from "../shared/social-links.js";
 import { contactPhone } from "../shared/contact-phone.js";
+import { customerPolicyMessages, type CustomerPolicyCode } from "../shared/customer-policy.js";
+import type { CustomerAppointment } from "../shared/customer-bookings.js";
+import { isUpcomingCustomerAppointment } from "../shared/customer-bookings.js";
 import { boundedBody, BodyTooLarge, MAX_LOGO_BYTES, validLogo } from "./company-logo.js";
 import { decodeStaffPhoto, MAX_STAFF_BODY, staffPhotoUrl } from "./staff-photo.js";
 import { appearanceError, readAppearance, isColor } from "../shared/booking-appearance.js";
@@ -295,9 +298,11 @@ function appBase(c: { req: { url: string }; env: Env["Bindings"] }): string | nu
 
 /** Company row bookable through `slug`, or null when unknown or not active. */
 type CompanyProfile = { id: number; name: string; slug: string; business_hours: string; social_links: string;
-  description: string; address: string; phone: string; public_email: string; website: string; logo_revision: string | null;
+  description: string; address: string; latitude: number | null; longitude: number | null;
+  phone: string; public_email: string; website: string; logo_revision: string | null;
   appearance_settings: string | null; cover_revision: string | null };
-const profileColumns = `id, name, slug, business_hours, description, address, phone, public_email, website, social_links,
+const profileColumns = `id, name, slug, business_hours, description, address, latitude, longitude,
+  phone, public_email, website, social_links,
   (SELECT settings FROM company_booking_appearance WHERE company_id = companies.id) AS appearance_settings,
   (SELECT revision FROM company_booking_appearance WHERE company_id = companies.id) AS cover_revision,
   (SELECT revision FROM company_logos WHERE company_id = companies.id) AS logo_revision`;
@@ -307,7 +312,8 @@ async function companyBySlug(slug: string): Promise<CompanyProfile | null> {
 }
 
 function publicProfile(company: CompanyProfile) {
-  return { description: company.description, address: company.address, phone: company.phone,
+  return { description: company.description, address: company.address,
+    latitude: company.latitude, longitude: company.longitude, phone: company.phone,
     appearance: readAppearance(company.appearance_settings),
     cover_url: company.slug && company.cover_revision ? `/api/public/${encodeURIComponent(company.slug)}/cover?v=${encodeURIComponent(company.cover_revision)}` : null,
     public_email: company.public_email, website: company.website, social_links: JSON.parse(company.social_links),
@@ -329,11 +335,32 @@ async function readCustomer(c: { req: { header(name: string): string | undefined
   return jwt ? verifyCustomerToken(c.env.AUTH_SECRET, jwt) : null;
 }
 
-// Only these two carry the customer session; overview and slots stay anonymous.
+// Customer-specific routes require the customer session; overview and slots stay anonymous.
 app.use("/api/public/:slug/book", async (c, next) => {
   const customer = await readCustomer(c);
   if (!customer) return c.json({ error: "Necesitás iniciar sesión para reservar" }, 401);
   c.set("customer", customer);
+  return next();
+});
+app.use("/api/public/:slug/eligibility", async (c, next) => {
+  const customer = await readCustomer(c);
+  if (!customer) return c.json({ error: "Inicie sesión para consultar su reserva" }, 401);
+  c.set("customer", customer);
+  return next();
+});
+app.use("/api/public/:slug/appointments/*", async (c, next) => {
+  const customer = await readCustomer(c);
+  if (!customer) return c.json({ error: "Inicie sesión con Google para ver sus turnos" }, 401);
+  c.set("customer", customer);
+  if (new URL(c.req.url).search && c.req.method !== "GET") return c.json({ error: "No se permiten parámetros adicionales" }, 400);
+  if (c.req.method !== "GET") {
+    try {
+      const bytes = await boundedBody(c.req.raw, 2048);
+      c.req.raw = new Request(c.req.url, { method: c.req.method, headers: c.req.raw.headers, body: new Uint8Array(bytes).buffer });
+    } catch (cause) {
+      return c.json({ error: "No se pudo leer la solicitud" }, cause instanceof BodyTooLarge ? 413 : 400);
+    }
+  }
   return next();
 });
 app.use("/api/auth/customer/session", async (c, next) => {
@@ -516,6 +543,7 @@ const ConflictSchema = z.object({
 }).openapi("Conflict");
 
 const ClientSchema = z.object({
+  trust_state: z.enum(["new", "returning", "blocked"]),
   id: z.number().int(),
   name: z.string(),
   email: z.string(),
@@ -1357,7 +1385,8 @@ const updateClient = createRoute({
       email: z.string().optional(),
       phone: z.string().optional(),
       notes: z.string().optional(),
-    }) } } },
+      trust_state: z.enum(["new", "returning", "blocked"]).optional(),
+    }).strict() } } },
   },
   responses: { 200: { description: "Updated", content: { "application/json": { schema: OkSchema } } }, 404: NotFoundResponse },
 });
@@ -1944,7 +1973,11 @@ const profileInput = z.object({
     catch { return false; }
   }),
   social_links: socialLinksInput,
-}).partial().strict();
+  latitude: z.number().min(-90).max(90).nullable().optional(),
+  longitude: z.number().min(-180).max(180).nullable().optional(),
+}).partial().strict().refine((value) => (value.latitude === undefined) === (value.longitude === undefined) &&
+  (value.latitude == null) === (value.longitude == null),
+  "La ubicación debe guardar latitud y longitud juntas.");
 
 app.get("/api/company/profile", async (c) => {
   if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de empresa" }, 400);
@@ -2018,14 +2051,19 @@ app.put("/api/company/profile", async (c) => {
   const parsed = profileInput.safeParse(input);
   if (!parsed.success) return c.json({ error: "Datos inválidos. Use enlaces http:// o https:// sin usuario ni contraseña (máximo 500 caracteres); revise también los demás campos." }, 400);
   const p = parsed.data;
+  const locationPatch = p.latitude !== undefined || p.longitude !== undefined;
   const socialPatch = p.social_links === undefined ? null : JSON.stringify(Object.fromEntries(
     Object.entries(p.social_links).map(([key, value]) => [key, value || null])));
   // One statement updates the complete public profile atomically; hours and logo have separate saves.
   await run(`UPDATE companies SET name = COALESCE(?, name), description = COALESCE(?, description),
-    address = COALESCE(?, address), phone = COALESCE(?, phone), public_email = COALESCE(?, public_email),
+    address = COALESCE(?, address), latitude = CASE WHEN ? THEN ? ELSE latitude END,
+    longitude = CASE WHEN ? THEN ? ELSE longitude END,
+    phone = COALESCE(?, phone), public_email = COALESCE(?, public_email),
     website = COALESCE(?, website), social_links = CASE WHEN ? IS NULL THEN social_links
       WHEN ? = '{}' THEN '{}' ELSE json_patch(social_links, ?) END WHERE id = ?`,
-    [p.name ?? null, p.description ?? null, p.address ?? null, p.phone ?? null, p.public_email ?? null, p.website ?? null,
+    [p.name ?? null, p.description ?? null, p.address ?? null,
+      locationPatch, p.latitude ?? null, locationPatch, p.longitude ?? null,
+      p.phone ?? null, p.public_email ?? null, p.website ?? null,
       socialPatch, socialPatch, socialPatch, tenant(c)]);
   return c.json({ ok: true });
 });
@@ -2138,7 +2176,8 @@ const publicOverview = createRoute({
       description: "What a customer sees before booking",
       content: { "application/json": { schema: z.object({
         company: z.object({ name: z.string(), slug: z.string(), business_hours: BusinessHoursSchema,
-          description: z.string(), address: z.string(), phone: z.string(), public_email: z.string(), website: z.string(), social_links: socialLinksInput, logo_url: z.string().nullable(),
+          description: z.string(), address: z.string(), latitude: z.number().nullable(), longitude: z.number().nullable(),
+          phone: z.string(), public_email: z.string(), website: z.string(), social_links: socialLinksInput, logo_url: z.string().nullable(),
           appearance: appearanceInput, cover_url: z.string().nullable() }),
         services: z.array(z.object({ id: z.number().int(), name: z.string(), duration: z.number().int(), price: z.number() })),
         staff: z.array(z.object({ id: z.number().int(), name: z.string(), title: z.string(), color: z.string(), photo_url: z.string().nullable(), service_ids: z.array(z.number().int()), effective_hours: BusinessHoursSchema })),
@@ -2233,6 +2272,137 @@ app.openapi(publicSlots, async (c) => {
   }, 200);
 });
 
+// Advisory only. Admission repeats this policy inside the write transaction.
+app.get("/api/public/:slug/eligibility", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de identidad" }, 400);
+  const company = await companyBySlug(c.req.param("slug"));
+  if (!company) return c.json({ error: "Empresa no encontrada" }, 404);
+  const email = c.get("customer").email.trim().toLowerCase();
+  const policy = await get<{ blocked: number; limited: number }>(`SELECT blocked, NOT is_returning AND active AS limited
+    FROM public_customer_policy_v2 WHERE company_id = ? AND email = ?`, [company.id, email]);
+  const code: CustomerPolicyCode | null = policy?.blocked ? "CUSTOMER_BLOCKED" : policy?.limited ? "CUSTOMER_ACTIVE_LIMIT" : null;
+  return c.json({ eligible: code === null, code, message: code ? customerPolicyMessages[code] : null });
+});
+
+/** Ownership is repeated in SQL, including every referenced service and staff. */
+const customerAppointmentScope = `FROM appointments a
+  JOIN tenant_ownership ao ON ao.resource_type = 'appointments' AND ao.resource_id = a.id AND ao.company_id = ?
+  JOIN clients cl ON cl.id = a.client_id
+  JOIN tenant_ownership co ON co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = ao.company_id
+  JOIN customer_appointment_snapshots_v1 v ON v.id = a.id
+  LEFT JOIN staff s ON s.id = a.staff_id
+  WHERE lower(trim(cl.email)) = ?
+    AND (a.staff_id IS NULL OR EXISTS (SELECT 1 FROM tenant_ownership so WHERE so.resource_type = 'staff'
+      AND so.resource_id = a.staff_id AND so.company_id = ao.company_id))
+    AND NOT EXISTS (SELECT 1 FROM appointment_services aps WHERE aps.appointment_id = a.id AND
+      (NOT EXISTS (SELECT 1 FROM tenant_ownership so WHERE so.resource_type = 'services'
+        AND so.resource_id = aps.service_id AND so.company_id = ao.company_id)
+      OR NOT EXISTS (SELECT 1 FROM tenant_ownership po WHERE po.resource_type = 'appointment_services'
+        AND po.resource_id = aps.id AND po.company_id = ao.company_id)))`;
+type CustomerAppointmentRow = Omit<CustomerAppointment, "version" | "services" | "duration" | "can_cancel" | "can_reschedule"> & {
+  snapshot: string; service_names: string; staff_id: number | null;
+};
+async function customerAppointments(companyId: number, email: string, id?: number) {
+  return query<CustomerAppointmentRow>(`SELECT a.id, a.identifier, a.status, a.scheduled_date, a.start_time, a.end_time,
+    a.total_price, a.staff_id, s.name AS staff_name, v.snapshot,
+    (SELECT json_group_array(name) FROM (SELECT sv.name FROM appointment_services aps JOIN services sv ON sv.id = aps.service_id
+      WHERE aps.appointment_id = a.id ORDER BY aps.id)) AS service_names
+    ${customerAppointmentScope} ${id === undefined ? "AND a.status IN ('booked', 'confirmed', 'in_progress')" : "AND a.id = ?"}
+    ORDER BY a.scheduled_date, a.start_time, a.id`, id === undefined ? [companyId, email] : [companyId, email, id]);
+}
+async function customerAppointmentVersion(snapshot: string) {
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(snapshot))))
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+async function customerProjection(row: CustomerAppointmentRow): Promise<CustomerAppointment> {
+  const duration = (toMinutes(row.end_time) ?? 0) - (toMinutes(row.start_time) ?? 0);
+  const waiting = Date.parse(`${row.scheduled_date}T${row.start_time}:00Z`) > Date.now();
+  return { id: row.id, identifier: row.identifier, status: row.status, scheduled_date: row.scheduled_date,
+    start_time: row.start_time, end_time: row.end_time, total_price: row.total_price, staff_name: row.staff_name,
+    services: JSON.parse(row.service_names), duration, version: await customerAppointmentVersion(row.snapshot),
+    can_cancel: ["booked", "confirmed"].includes(row.status) && waiting,
+    can_reschedule: ["booked", "confirmed"].includes(row.status) && waiting && row.staff_id !== null && duration > 0 };
+}
+async function customerMoveSlots(company: CompanyProfile, row: CustomerAppointmentRow, date: string, db: D1Database) {
+  if (!["booked", "confirmed"].includes(row.status) || Date.parse(`${row.scheduled_date}T${row.start_time}:00Z`) <= Date.now() || row.staff_id === null) return null;
+  const member = await get<SchedulingPolicy & { working_hours: string | null }>(`SELECT s.* FROM staff s WHERE s.id = ? AND s.active = 1
+    AND EXISTS (SELECT 1 FROM appointment_services WHERE appointment_id = ?)
+    AND NOT EXISTS (SELECT 1 FROM appointment_services aps JOIN services sv ON sv.id = aps.service_id
+      WHERE aps.appointment_id = ? AND (sv.active != 1 OR NOT EXISTS (SELECT 1 FROM staff_services ss
+        WHERE ss.company_id = ? AND ss.staff_id = s.id AND ss.service_id = aps.service_id)))`,
+    [row.staff_id, row.id, row.id, company.id]);
+  if (!member) return null;
+  const duration = (toMinutes(row.end_time) ?? 0) - (toMinutes(row.start_time) ?? 0);
+  return publicStarts(effectiveWindows(parseBusinessHours(company.business_hours), member.working_hours, date), duration,
+    await busyForOwner(db, company.id, row.staff_id, date, row.id), member, bookingFloor(date));
+}
+app.get("/api/public/:slug/appointments", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de identidad" }, 400);
+  const company = await companyBySlug(c.req.param("slug"));
+  if (!company) return c.json({ error: "Empresa no encontrada" }, 404);
+  const now = new Date();
+  return c.json({ appointments: await Promise.all((await customerAppointments(company.id,
+    c.get("customer").email.trim().toLowerCase())).filter((row) => isUpcomingCustomerAppointment(row, now)).map(customerProjection)) });
+});
+app.get("/api/public/:slug/appointments/:id", async (c) => {
+  if (new URL(c.req.url).search) return c.json({ error: "No se permiten parámetros de identidad" }, 400);
+  const company = await companyBySlug(c.req.param("slug"));
+  const row = company && /^\d+$/.test(c.req.param("id")) ? (await customerAppointments(company.id,
+    c.get("customer").email.trim().toLowerCase(), Number(c.req.param("id"))))[0] : null;
+  return row ? c.json({ appointment: await customerProjection(row) }) : c.json({ error: "Turno no encontrado" }, 404);
+});
+app.get("/api/public/:slug/appointments/:id/slots", async (c) => {
+  const params = new URL(c.req.url).searchParams;
+  if ([...params.keys()].some((key) => key !== "date") || params.getAll("date").length !== 1 || !futureBooking(params.get("date") ?? ""))
+    return c.json({ error: "Seleccione una fecha válida y futura" }, 400);
+  const company = await companyBySlug(c.req.param("slug"));
+  const row = company && /^\d+$/.test(c.req.param("id")) ? (await customerAppointments(company.id,
+    c.get("customer").email.trim().toLowerCase(), Number(c.req.param("id"))))[0] : null;
+  if (!company || !row) return c.json({ error: "Turno no encontrado" }, 404);
+  const slots = await customerMoveSlots(company, row, params.get("date")!, c.env.DB);
+  return slots === null ? c.json({ error: "No se puede reprogramar este turno en línea. Contacte a la empresa." }, 409) : c.json({ slots });
+});
+const customerActionInput = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("cancel"), version: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  z.object({ action: z.literal("reschedule"), version: z.string().regex(/^[a-f0-9]{64}$/),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), start_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/) }).strict(),
+]);
+app.post("/api/public/:slug/appointments/:id/actions", async (c) => {
+  const input = customerActionInput.safeParse(await c.req.json().catch(() => null));
+  if (!input.success) return c.json({ error: "Solicitud inválida" }, 400);
+  const company = await companyBySlug(c.req.param("slug"));
+  const email = c.get("customer").email.trim().toLowerCase();
+  const row = company && /^\d+$/.test(c.req.param("id")) ? (await customerAppointments(company.id, email, Number(c.req.param("id"))))[0] : null;
+  if (!company || !row) return c.json({ error: "Turno no encontrado" }, 404);
+  const body = input.data;
+  if (body.version !== await customerAppointmentVersion(row.snapshot) || !["booked", "confirmed"].includes(row.status) || Date.parse(`${row.scheduled_date}T${row.start_time}:00Z`) <= Date.now())
+    return c.json({ error: "El turno cambió o ya no admite cambios. Actualice sus turnos antes de continuar." }, 409);
+  let date = row.scheduled_date, start = row.start_time, end = row.end_time;
+  if (body.action === "reschedule") {
+    if (!futureBooking(body.date, body.start_time)) return c.json({ error: "Seleccione una fecha y hora futuras" }, 400);
+    const slots = await customerMoveSlots(company, row, body.date, c.env.DB);
+    if (!slots?.includes(body.start_time)) return c.json({ error: "El horario no está disponible. Actualice los horarios o contacte a la empresa." }, 409);
+    date = body.date; start = body.start_time;
+    end = addMinutes(start, (toMinutes(row.end_time) ?? 0) - (toMinutes(row.start_time) ?? 0));
+  }
+  if (!c.env.DB?.batch) return c.json({ error: "Se requieren transacciones D1" }, 503);
+  const admissionId = crypto.randomUUID();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(`INSERT INTO customer_appointment_admission
+        (id, company_id, appointment_id, customer_email, expected_snapshot, action, scheduled_date, start_time, end_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(admissionId, company.id, row.id, email, row.snapshot, body.action, date, start, end),
+      c.env.DB.prepare("DELETE FROM customer_appointment_admission WHERE id = ?").bind(admissionId),
+    ]);
+  } catch (cause) {
+    if (String(cause).includes("customer appointment changed") || String(cause).includes("customer schedule unavailable"))
+      return c.json({ error: "El turno o la disponibilidad cambiaron. Actualice los datos antes de confirmar nuevamente." }, 409);
+    throw cause;
+  }
+  const updated = (await customerAppointments(company.id, email, row.id))[0];
+  return updated ? c.json({ appointment: await customerProjection(updated) }) : c.json({ error: "Turno no encontrado" }, 404);
+});
+
 const publicBook = createRoute({
   method: "post",
   path: "/api/public/{slug}/book",
@@ -2244,7 +2414,7 @@ const publicBook = createRoute({
       start_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
       staff_id: z.number().int().optional(),
       contact_phone: z.string().refine((value) => contactPhone(value) !== null, "Ingrese un teléfono de contacto válido"),
-    }) } } },
+    }).strict() } } },
   },
   responses: {
     201: {
@@ -2256,8 +2426,9 @@ const publicBook = createRoute({
     },
     400: { description: "Unknown service or staff member for this company", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Customer sign-in required", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Customer cannot make new public bookings", content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal("CUSTOMER_BLOCKED") }) } } },
     404: NotFoundResponse,
-    409: { description: "Slot is no longer available", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Slot unavailable or new customer already has an active appointment", content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal("CUSTOMER_ACTIVE_LIMIT").optional() }) } } },
     503: { description: "Booking requires D1 transactions", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
@@ -2335,8 +2506,8 @@ app.openapi(publicBook, async (c) => {
   let results;
   try {
     results = await db.batch([
-    db.prepare("INSERT INTO public_booking_admission (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(admissionId, company.id, staffId, body.service_id, body.date, body.start_time, endTime),
+    db.prepare("INSERT INTO public_booking_admission (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time, customer_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(admissionId, company.id, staffId, body.service_id, body.date, body.start_time, endTime, email),
     ...clientStatements,
     db.prepare(`INSERT OR IGNORE INTO _meta (key, value)
       SELECT 'appointment_counter', CAST(COALESCE(MAX(CAST(SUBSTR(identifier, 5) AS INTEGER)), 0) AS TEXT)
@@ -2359,6 +2530,8 @@ app.openapi(publicBook, async (c) => {
     db.prepare("DELETE FROM public_booking_admission WHERE id = ?").bind(admissionId),
   ]);
   } catch (cause) {
+    if (String(cause).includes("public customer blocked")) return c.json({ error: customerPolicyMessages.CUSTOMER_BLOCKED, code: "CUSTOMER_BLOCKED" }, 403);
+    if (String(cause).includes("public customer active limit")) return c.json({ error: customerPolicyMessages.CUSTOMER_ACTIVE_LIMIT, code: "CUSTOMER_ACTIVE_LIMIT" }, 409);
     if (String(cause).includes("public booking conflict")) return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
     throw cause;
   }

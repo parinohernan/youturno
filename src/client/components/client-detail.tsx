@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "./status-badge";
 import { CreateAppointment } from "./create-appointment";
+import { CustomerTrustBadge, CustomerTrustControl } from "./customer-trust";
 import { strings } from "@/lib/strings";
 import { formatMoney, formatDate, formatDateTime } from "@/lib/format";
 
@@ -19,13 +20,22 @@ export function ClientDetail() {
   const [email, setEmail] = useState(client?.email || "");
   const [phone, setPhone] = useState(client?.phone || "");
   const [notes, setNotes] = useState(client?.notes || "");
+  const [trustState, setTrustState] = useState(client?.trust_state || "new");
+  const [trustChanged, setTrustChanged] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   if (!client) return null;
 
   const handleSave = async () => {
-    await updateClient(client.id, { name, email, phone, notes });
-    setEditing(false);
+    if (saving) return;
+    setSaving(true); setSaveError("");
+    try {
+      await updateClient(client.id, { name, email, phone, notes, ...(trustChanged ? { trust_state: trustState } : {}) });
+      setEditing(false);
+    } catch (cause) { setSaveError((cause as Error).message || "No se pudieron guardar los cambios."); }
+    finally { setSaving(false); }
   };
 
   return (
@@ -45,6 +55,9 @@ export function ClientDetail() {
         </div>
       </div>
 
+      <CustomerTrustBadge state={client.trust_state} />
+      {client.trust_state === "blocked" && <p className="text-sm" role="note">Las reservas en línea están bloqueadas. Reservar turno desde esta ficha es una excepción manual de la administración; no cambia el estado ni cancela turnos existentes.</p>}
+
       {showCreate && (
         <CreateAppointment
           defaultClientId={client.id}
@@ -57,18 +70,20 @@ export function ClientDetail() {
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Datos</CardTitle>
             {!editing ? (
-              <Button variant="outline" size="sm" onClick={() => setEditing(true)}>Editar</Button>
+              <Button variant="outline" size="sm" onClick={() => { setTrustState(client.trust_state || "new"); setTrustChanged(false); setEditing(true); }}>Editar</Button>
             ) : (
-              <Button size="sm" onClick={handleSave}><Save className="mr-1 h-3.5 w-3.5" /> Guardar</Button>
+              <Button size="sm" disabled={saving} onClick={handleSave}><Save className="mr-1 h-3.5 w-3.5" /> {saving ? "Guardando…" : "Guardar"}</Button>
             )}
           </CardHeader>
           <CardContent className="space-y-3">
+            {saveError && <p role="alert" className="text-sm text-destructive">{saveError}</p>}
             {editing ? (
               <>
                 <div className="space-y-1.5"><Label>Nombre</Label><Input value={name} onChange={(e) => setName((e.target as HTMLInputElement).value)} /></div>
                 <div className="space-y-1.5"><Label>Correo electrónico</Label><Input value={email} onChange={(e) => setEmail((e.target as HTMLInputElement).value)} /></div>
                 <div className="space-y-1.5"><Label>Teléfono</Label><Input value={phone} onChange={(e) => setPhone((e.target as HTMLInputElement).value)} /></div>
                 <div className="space-y-1.5"><Label>Notas</Label><Textarea rows={3} value={notes} onChange={(e) => setNotes((e.target as HTMLTextAreaElement).value)} /></div>
+                <CustomerTrustControl value={trustState} onChange={(value) => { setTrustState(value); setTrustChanged(true); }} />
               </>
             ) : (
               <>

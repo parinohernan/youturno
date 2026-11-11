@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS clients (
   email TEXT DEFAULT '',
   phone TEXT DEFAULT '',
   notes TEXT DEFAULT '',
+  trust_state TEXT NOT NULL DEFAULT 'new' CHECK (trust_state IN ('new', 'returning', 'blocked')),
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -113,6 +114,8 @@ CREATE TABLE IF NOT EXISTS companies (
   slug TEXT UNIQUE,
   description TEXT NOT NULL DEFAULT '',
   address TEXT NOT NULL DEFAULT '',
+  latitude REAL,
+  longitude REAL,
   phone TEXT NOT NULL DEFAULT '',
   public_email TEXT NOT NULL DEFAULT '',
   social_links TEXT NOT NULL DEFAULT '{}',
@@ -158,7 +161,55 @@ CREATE TABLE IF NOT EXISTS tenant_ownership (
   company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
   PRIMARY KEY (resource_type, resource_id)
 );
+-- Only a successful transition to completed promotes a new customer. Ownership
+-- must match on both sides; blocked/manual returning states are never changed.
+CREATE TRIGGER IF NOT EXISTS promote_completed_customer_v1 AFTER UPDATE OF status ON appointments
+WHEN NEW.status = 'completed' AND OLD.status != 'completed'
+BEGIN
+  UPDATE clients SET trust_state = 'returning', updated_at = datetime('now')
+  WHERE id = NEW.client_id AND trust_state = 'new' AND EXISTS (
+    SELECT 1 FROM tenant_ownership co JOIN tenant_ownership ao ON ao.company_id = co.company_id
+      AND ao.resource_type = 'appointments' AND ao.resource_id = NEW.id
+    WHERE co.resource_type = 'clients' AND co.resource_id = clients.id);
+END;
 CREATE INDEX IF NOT EXISTS idx_tenant_ownership_company ON tenant_ownership(company_id, resource_type);
+-- Completed attendance is durable evidence, even after an administrator selects
+-- new again. Never infer attendance from cancelled, no-show or expired bookings.
+CREATE VIEW IF NOT EXISTS completed_customer_history_v2 AS
+SELECT DISTINCT a.client_id, ao.company_id FROM appointments a
+JOIN tenant_ownership ao ON ao.resource_type = 'appointments' AND ao.resource_id = a.id
+JOIN tenant_ownership co ON co.resource_type = 'clients' AND co.resource_id = a.client_id AND co.company_id = ao.company_id
+WHERE a.status = 'completed';
+CREATE TRIGGER IF NOT EXISTS normalize_customer_trust_v2 AFTER UPDATE OF trust_state ON clients
+WHEN NEW.trust_state = 'new'
+BEGIN
+  UPDATE clients SET trust_state = 'returning' WHERE id = NEW.id
+    AND EXISTS (SELECT 1 FROM completed_customer_history_v2 h WHERE h.client_id = NEW.id);
+END;
+-- Imports and ordinary creation attach ownership after inserting the resource.
+CREATE TRIGGER IF NOT EXISTS normalize_owned_customer_v2 AFTER INSERT ON tenant_ownership
+WHEN NEW.resource_type IN ('clients', 'appointments')
+BEGIN
+  UPDATE clients SET trust_state = 'returning' WHERE trust_state = 'new'
+    AND EXISTS (SELECT 1 FROM completed_customer_history_v2 h WHERE h.client_id = clients.id AND h.company_id = NEW.company_id)
+    AND (NEW.resource_type = 'clients' AND clients.id = NEW.resource_id OR NEW.resource_type = 'appointments'
+      AND clients.id = (SELECT client_id FROM appointments WHERE id = NEW.resource_id));
+END;
+-- Idempotent reconciliation changes only the explicitly approved trust flag.
+UPDATE clients SET trust_state = 'returning' WHERE trust_state = 'new'
+  AND EXISTS (SELECT 1 FROM completed_customer_history_v2 h WHERE h.client_id = clients.id);
+-- One database-clock definition shared by advisory eligibility and atomic admission.
+CREATE VIEW IF NOT EXISTS public_customer_policy_v2 AS
+SELECT co.company_id, lower(trim(c.email)) AS email,
+  max(c.trust_state = 'blocked') AS blocked,
+  max(c.trust_state = 'returning' OR EXISTS (SELECT 1 FROM completed_customer_history_v2 h
+    WHERE h.client_id = c.id AND h.company_id = co.company_id)) AS is_returning,
+  max(EXISTS (SELECT 1 FROM appointments a JOIN tenant_ownership ao
+    ON ao.resource_type = 'appointments' AND ao.resource_id = a.id AND ao.company_id = co.company_id
+    WHERE a.client_id = c.id AND a.status IN ('booked', 'confirmed', 'in_progress')
+      AND julianday(a.scheduled_date || ' ' || a.end_time) > julianday('now'))) AS active
+FROM clients c JOIN tenant_ownership co ON co.resource_type = 'clients' AND co.resource_id = c.id
+GROUP BY co.company_id, lower(trim(c.email));
 -- Explicit qualifications only: legacy staff deliberately receive no mappings.
 CREATE TABLE IF NOT EXISTS staff_services (
   company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
@@ -349,6 +400,7 @@ CREATE TABLE IF NOT EXISTS public_booking_admission (
   company_id INTEGER NOT NULL REFERENCES companies(id),
   staff_id INTEGER NOT NULL REFERENCES staff(id),
   service_id INTEGER REFERENCES services(id),
+  customer_email TEXT,
   scheduled_date TEXT NOT NULL,
   start_time TEXT NOT NULL,
   end_time TEXT NOT NULL
@@ -367,6 +419,18 @@ BEGIN
     SELECT 1 FROM blocked_slots b JOIN tenant_ownership o ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id
     WHERE o.company_id = NEW.company_id AND b.staff_id = NEW.staff_id AND b.blocked_date = NEW.scheduled_date
       AND b.start_time < NEW.end_time AND b.end_time > NEW.start_time);
+END;
+-- Email is normalized from the signed Google session, never request input.
+-- Check before find/create in the SAME batch: concurrent first bookings cannot
+-- both pass. Count all same-company matching files, including legacy duplicates.
+DROP TRIGGER IF EXISTS admit_public_customer_v1;
+CREATE TRIGGER IF NOT EXISTS admit_public_customer_v2 BEFORE INSERT ON public_booking_admission
+WHEN NEW.customer_email IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'public customer blocked') WHERE EXISTS (
+    SELECT 1 FROM public_customer_policy_v2 WHERE company_id = NEW.company_id AND email = NEW.customer_email AND blocked);
+  SELECT RAISE(ABORT, 'public customer active limit') WHERE EXISTS (
+    SELECT 1 FROM public_customer_policy_v2 WHERE company_id = NEW.company_id AND email = NEW.customer_email AND NOT is_returning AND active);
 END;
 -- Public-only qualification guard; manual tenant bookings retain their policy.
 CREATE TRIGGER IF NOT EXISTS admit_public_booking_service_v1 BEFORE INSERT ON public_booking_admission
@@ -480,6 +544,131 @@ BEGIN
             AND NOT EXISTS (SELECT 1 FROM occupied o WHERE o.lo < start + w.duration AND o.hi > start)
         )))
   );
+END;
+-- Customer actions never reuse professional authority or create a second booking.
+-- The snapshot includes every service link so even same-second edits are detected.
+CREATE VIEW IF NOT EXISTS customer_appointment_snapshots_v1 AS
+SELECT a.id, json_array(a.client_id, a.staff_id, a.status, a.scheduled_date, a.start_time,
+  a.end_time, a.total_price, a.updated_at,
+  (SELECT json_group_array(json_array(id, service_id, price, duration)) FROM
+    (SELECT id, service_id, price, duration FROM appointment_services WHERE appointment_id = a.id ORDER BY id))) AS snapshot
+FROM appointments a;
+CREATE TABLE IF NOT EXISTS customer_appointment_admission (
+  id TEXT PRIMARY KEY,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  appointment_id INTEGER NOT NULL REFERENCES appointments(id),
+  customer_email TEXT NOT NULL,
+  expected_snapshot TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('cancel', 'reschedule')),
+  scheduled_date TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL
+);
+DROP TRIGGER IF EXISTS admit_customer_appointment_v1;
+CREATE TRIGGER IF NOT EXISTS admit_customer_appointment_v2 BEFORE INSERT ON customer_appointment_admission
+BEGIN
+  SELECT RAISE(ABORT, 'customer appointment changed') WHERE NOT EXISTS (
+    SELECT 1 FROM appointments a JOIN customer_appointment_snapshots_v1 v ON v.id = a.id
+    JOIN tenant_ownership ao ON ao.resource_type = 'appointments' AND ao.resource_id = a.id AND ao.company_id = NEW.company_id
+    JOIN clients cl ON cl.id = a.client_id
+    JOIN tenant_ownership co ON co.resource_type = 'clients' AND co.resource_id = cl.id AND co.company_id = NEW.company_id
+    JOIN companies c ON c.id = NEW.company_id AND c.status = 'active'
+    WHERE a.id = NEW.appointment_id AND lower(trim(cl.email)) = NEW.customer_email
+      AND a.status IN ('booked', 'confirmed') AND v.snapshot = NEW.expected_snapshot
+      AND julianday(a.scheduled_date || ' ' || a.start_time) > julianday('now')
+      AND (a.staff_id IS NULL OR EXISTS (SELECT 1 FROM tenant_ownership so
+        WHERE so.resource_type = 'staff' AND so.resource_id = a.staff_id AND so.company_id = NEW.company_id))
+      AND NOT EXISTS (SELECT 1 FROM appointment_services aps WHERE aps.appointment_id = a.id AND
+        (NOT EXISTS (SELECT 1 FROM tenant_ownership so WHERE so.resource_type = 'services'
+          AND so.resource_id = aps.service_id AND so.company_id = NEW.company_id)
+        OR NOT EXISTS (SELECT 1 FROM tenant_ownership po WHERE po.resource_type = 'appointment_services'
+          AND po.resource_id = aps.id AND po.company_id = NEW.company_id))));
+END;
+CREATE TRIGGER IF NOT EXISTS admit_customer_reschedule_v1 BEFORE INSERT ON customer_appointment_admission
+WHEN NEW.action = 'reschedule'
+BEGIN
+  -- Existing blocked customers may manage their appointment, never gain quota or change trust.
+  SELECT RAISE(ABORT, 'customer schedule unavailable') WHERE NOT EXISTS (
+    SELECT 1 FROM appointments a JOIN staff s ON s.id = a.staff_id AND s.active = 1
+    JOIN tenant_ownership so ON so.resource_type = 'staff' AND so.resource_id = s.id AND so.company_id = NEW.company_id
+    WHERE a.id = NEW.appointment_id
+      AND EXISTS (SELECT 1 FROM appointment_services WHERE appointment_id = a.id)
+      AND NOT EXISTS (SELECT 1 FROM appointment_services aps LEFT JOIN services sv ON sv.id = aps.service_id
+        WHERE aps.appointment_id = a.id AND (sv.active IS NOT 1 OR NOT EXISTS (
+          SELECT 1 FROM staff_services ss WHERE ss.company_id = NEW.company_id AND ss.staff_id = s.id AND ss.service_id = aps.service_id)))) ;
+  SELECT RAISE(ABORT, 'customer schedule unavailable') WHERE EXISTS (
+    SELECT 1 FROM appointments a JOIN appointments current ON current.id = NEW.appointment_id
+    JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id AND o.company_id = NEW.company_id
+    WHERE a.id != current.id AND a.staff_id = current.staff_id AND a.scheduled_date = NEW.scheduled_date
+      AND a.status != 'cancelled' AND a.start_time < NEW.end_time AND a.end_time > NEW.start_time);
+  SELECT RAISE(ABORT, 'customer schedule unavailable') WHERE EXISTS (
+    SELECT 1 FROM blocked_slots b JOIN appointments a ON a.id = NEW.appointment_id
+    JOIN tenant_ownership o ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id AND o.company_id = NEW.company_id
+    WHERE b.staff_id = a.staff_id AND b.blocked_date = NEW.scheduled_date
+      AND b.start_time < NEW.end_time AND b.end_time > NEW.start_time);
+  -- Same public cadence rules, using the WHOLE reserved interval, excluding self.
+  SELECT RAISE(ABORT, 'customer schedule unavailable') WHERE NOT EXISTS (
+    WITH source AS (
+      SELECT s.scheduling_mode AS mode, s.scheduling_interval AS cadence,
+        (CAST(substr(a.end_time,1,2) AS INTEGER)*60 + CAST(substr(a.end_time,4,2) AS INTEGER)) -
+        (CAST(substr(a.start_time,1,2) AS INTEGER)*60 + CAST(substr(a.start_time,4,2) AS INTEGER)) AS duration,
+        CAST(substr(NEW.start_time,1,2) AS INTEGER)*60 + CAST(substr(NEW.start_time,4,2) AS INTEGER) AS requested,
+        CASE WHEN json_valid(c.business_hours) THEN c.business_hours ELSE '{}' END AS company_hours,
+        CASE WHEN json_valid(s.working_hours) THEN s.working_hours ELSE '{}' END AS personal_hours,
+        s.working_hours IS NULL AS inherit,
+        s.working_hours IS NULL OR (json_valid(s.working_hours) AND json_type(CASE WHEN json_valid(s.working_hours) THEN s.working_hours ELSE '{}' END) = 'object') AS valid_personal,
+        '$.' || CASE strftime('%w', NEW.scheduled_date) WHEN '0' THEN 'sun' WHEN '1' THEN 'mon' WHEN '2' THEN 'tue'
+          WHEN '3' THEN 'wed' WHEN '4' THEN 'thu' WHEN '5' THEN 'fri' WHEN '6' THEN 'sat' END AS path
+      FROM appointments a JOIN staff s ON s.id = a.staff_id JOIN companies c ON c.id = NEW.company_id
+      WHERE a.id = NEW.appointment_id
+    ), days AS (
+      SELECT *, json_extract(company_hours,path) AS company_day,
+        CASE WHEN inherit OR json_type(personal_hours,path) IS NULL THEN json_extract(company_hours,path)
+          ELSE json_extract(personal_hours,path) END AS personal_day FROM source WHERE valid_personal
+    ), pairs AS (
+      SELECT max(json_extract(c.value,'$[0]'),json_extract(p.value,'$[0]')) AS opening,
+        min(json_extract(c.value,'$[1]'),json_extract(p.value,'$[1]')) AS closing, mode,cadence,duration,requested
+      FROM days,
+        json_each(CASE WHEN json_type(company_day,'$[0]') = 'text' THEN json_array(json(company_day)) ELSE company_day END) c,
+        json_each(CASE WHEN json_type(personal_day,'$[0]') = 'text' THEN json_array(json(personal_day)) ELSE personal_day END) p
+    ), windows AS (
+      SELECT CAST(substr(opening,1,2) AS INTEGER)*60 + CAST(substr(opening,4,2) AS INTEGER) AS lo,
+        CAST(substr(closing,1,2) AS INTEGER)*60 + CAST(substr(closing,4,2) AS INTEGER) AS hi,
+        mode,cadence,duration,requested FROM pairs WHERE opening < closing
+    ), busy AS (
+      SELECT a.start_time AS start,a.end_time AS finish FROM appointments a JOIN appointments current ON current.id = NEW.appointment_id
+      JOIN tenant_ownership o ON o.resource_type = 'appointments' AND o.resource_id = a.id AND o.company_id = NEW.company_id
+      WHERE a.id != current.id AND a.staff_id = current.staff_id AND a.scheduled_date = NEW.scheduled_date AND a.status != 'cancelled'
+      UNION ALL SELECT b.start_time,b.end_time FROM blocked_slots b JOIN appointments a ON a.id = NEW.appointment_id
+      JOIN tenant_ownership o ON o.resource_type = 'blocked_slots' AND o.resource_id = b.id AND o.company_id = NEW.company_id
+      WHERE b.staff_id = a.staff_id AND b.blocked_date = NEW.scheduled_date
+    ), occupied AS (
+      SELECT CAST(substr(start,1,2) AS INTEGER)*60 + CAST(substr(start,4,2) AS INTEGER) AS lo,
+        CAST(substr(finish,1,2) AS INTEGER)*60 + CAST(substr(finish,4,2) AS INTEGER) AS hi FROM busy
+    ), boundaries AS (
+      SELECT lo AS start FROM windows UNION SELECT hi FROM occupied UNION
+      SELECT CAST(strftime('%H','now') AS INTEGER)*60 + CAST(strftime('%M','now') AS INTEGER)
+        + CASE WHEN CAST(strftime('%f','now') AS REAL) > 0 THEN 1 ELSE 0 END WHERE NEW.scheduled_date = date('now')
+    )
+    SELECT 1 FROM windows w WHERE duration > 0 AND duration < 1440
+      AND NEW.scheduled_date = date(NEW.scheduled_date,'+0 days')
+      AND julianday(NEW.scheduled_date || ' ' || NEW.start_time) >= julianday('now')
+      AND NEW.end_time = printf('%02d:%02d',(requested+duration)/60,(requested+duration)%60)
+      AND requested >= lo AND requested+duration <= hi
+      AND ((mode = 'fixed' AND cadence BETWEEN 1 AND 240 AND requested % cadence = 0)
+        OR (mode = 'service_duration' AND (requested-lo) % duration = 0)
+        OR (mode = 'consecutive' AND requested = (SELECT min(start) FROM boundaries
+          WHERE start >= w.lo AND start+w.duration <= w.hi
+            AND julianday(NEW.scheduled_date || ' ' || printf('%02d:%02d',start/60,start%60)) >= julianday('now')
+            AND NOT EXISTS (SELECT 1 FROM occupied o WHERE o.lo < start+w.duration AND o.hi > start)))));
+END;
+CREATE TRIGGER IF NOT EXISTS apply_customer_appointment_v1 AFTER INSERT ON customer_appointment_admission
+BEGIN
+  UPDATE appointments SET status = CASE WHEN NEW.action = 'cancel' THEN 'cancelled' ELSE status END,
+    scheduled_date = CASE WHEN NEW.action = 'reschedule' THEN NEW.scheduled_date ELSE scheduled_date END,
+    start_time = CASE WHEN NEW.action = 'reschedule' THEN NEW.start_time ELSE start_time END,
+    end_time = CASE WHEN NEW.action = 'reschedule' THEN NEW.end_time ELSE end_time END,
+    updated_at = datetime('now') WHERE id = NEW.appointment_id;
 END;
 -- Cascading SQLite deletes also fire these triggers, so sidecar rows cannot
 -- outlive a deleted resource and be mistaken for a future resource ID.

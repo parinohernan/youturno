@@ -79,6 +79,7 @@ export function CreateAppointment({ onClose, defaultDate, defaultClientId, defau
           <DialogTitle>Nuevo turno</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
+          <p className="text-sm text-muted-foreground" role="note">Reserva manual de la administración: permite crear turnos para clientes nuevos con turnos activos o bloqueados. No modifica su estado ni sus reservas existentes; el bloqueo se aplica a nuevas reservas en línea.</p>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Cliente *</Label>

@@ -32,13 +32,27 @@ test("public company details keep contact as text and allow only safe website/lo
   assert.ok(tree.includes(company.address));
   assert.ok(tree.includes(company.phone));
   assert.ok(tree.includes(company.public_email));
+  const addressQuery = encodeURIComponent(company.address);
+  assert.ok(tree.find((n) => n.type === "iframe").props.src.includes(`q=${addressQuery}`));
+  assert.ok(tree.find((n) => n.type === "a").props.href.includes(`query=${addressQuery}`));
+  const located = nodes(CompanyPublicDetails({ company: { ...company, latitude: -34.6, longitude: -58.38 } }));
+  assert.ok(located.find((n) => n.type === "iframe").props.src.includes("q=-34.6%2C-58.38"));
+  assert.ok(located.find((n) => n.type === "a").props.href.includes("query=-34.6%2C-58.38"));
+  assert.ok(located.includes(company.address), "the written address stays visible");
+  const coordinatesOnly = nodes(CompanyPublicDetails({ company: { name: "Located", latitude: 0, longitude: 0 } }));
+  assert.ok(coordinatesOnly.find((n) => n.type === "iframe").props.src.includes("q=0%2C0"));
+  assert.ok(coordinatesOnly.find((n) => n.type === "a").props.href.includes("query=0%2C0"));
+  const partial = nodes(CompanyPublicDetails({ company: { ...company, latitude: -34.6 } }));
+  assert.ok(partial.find((n) => n.type === "iframe").props.src.includes(`q=${addressQuery}`));
   assert.ok(tree.every((n) => !n.props?.dangerouslySetInnerHTML));
   assert.equal(tree.find((n) => n.type === "a").props.rel, "noopener noreferrer");
   for (const value of ["javascript:alert(1)", "data:text/html,x", "//example.test", "https://user:pass@example.test"])
     assert.equal(safeWebsite(value), null);
   assert.ok(safeWebsite("http://example.test"));
   const unsafe = nodes(CompanyPublicDetails({ company: { ...company, website: "javascript:bad()", logo_url: "data:image/svg+xml,x" } }));
-  assert.equal(unsafe.some((n) => n.type === "a" || n.type === "img"), false);
+  assert.equal(unsafe.some((n) => n.type === "img"), false);
+  assert.ok(unsafe.filter((n) => n.type === "a").every((n) => n.props.href.startsWith("https://www.google.com/maps/")),
+    "only the derived Maps link may render alongside an unsafe website/logo");
   const empty = nodes(CompanyPublicDetails({ company: { name: "Empty", social_links: {} } }));
   assert.equal(empty.some((n) => n.type === "a" || n.type === "nav"), false);
   const social = nodes(CompanyPublicDetails({ company: { name: "Salon", social_links: {

@@ -2,11 +2,106 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { companyUpgrade, staffUpgrade, admissionUpgrade } from "../../scripts/public-booking-migration.mjs";
+import { companyUpgrade, staffUpgrade, admissionUpgrade, clientUpgrade } from "../../scripts/public-booking-migration.mjs";
 
 const schema = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
 const migration = readFileSync(new URL("./migrate-legacy.sql", import.meta.url), "utf8");
 const types = ["clients", "staff", "services", "appointments", "appointment_services", "appointment_notes", "blocked_slots", "products"];
+
+test("policy upgrade reconciles existing manual new only with owned completed history, replaces v1 and is idempotent", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(schema);
+    db.exec(`DROP TRIGGER normalize_customer_trust_v2; DROP TRIGGER normalize_owned_customer_v2;
+      INSERT INTO companies(id,name,status) VALUES(1,'First','active'),(2,'Second','active');
+      INSERT INTO clients(id,name,trust_state) VALUES(1,'Completed','new'),(2,'Blocked','blocked'),
+        (3,'Manual returning','returning'),(4,'Cancelled','new'),(5,'No show','new'),(6,'Other company','new');
+      INSERT INTO tenant_ownership VALUES('clients',1,1),('clients',2,1),('clients',3,1),('clients',4,1),('clients',5,1),('clients',6,2);
+      INSERT INTO appointments(id,identifier,client_id,status) VALUES(1,'A1',1,'completed'),(2,'A2',2,'completed'),
+        (3,'A3',4,'cancelled'),(4,'A4',5,'no_show'),(5,'A5',6,'completed');
+      INSERT INTO tenant_ownership VALUES('appointments',1,1),('appointments',2,1),('appointments',3,1),('appointments',4,1);
+      CREATE TRIGGER admit_public_customer_v1 BEFORE INSERT ON public_booking_admission BEGIN SELECT RAISE(ABORT,'old policy'); END;`);
+    const clients = db.prepare("SELECT * FROM clients ORDER BY id").all().map((c) => ({ ...c }));
+    const appointments = db.prepare("SELECT * FROM appointments ORDER BY id").all();
+    db.exec(schema);
+    assert.deepEqual(db.prepare("SELECT * FROM clients ORDER BY id").all().map((c) => ({ ...c })), clients.map((c) => c.id === 1 ? { ...c, trust_state: "returning" } : c));
+    assert.deepEqual(db.prepare("SELECT * FROM appointments ORDER BY id").all(), appointments);
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='admit_public_customer_v1'").get(), undefined);
+    const reconciled = db.prepare("SELECT * FROM clients ORDER BY id").all();
+    db.exec(schema);
+    assert.deepEqual(db.prepare("SELECT * FROM clients ORDER BY id").all(), reconciled);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    db.exec("UPDATE clients SET trust_state='new' WHERE id=1; UPDATE clients SET trust_state='new' WHERE id=2");
+    assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id=1").get()?.trust_state, "returning");
+    assert.equal(db.prepare("SELECT trust_state FROM clients WHERE id=2").get()?.trust_state, "returning", "explicit unblock to new uses completed history");
+  } finally { db.close(); }
+});
+
+test("customer self-service migration is additive and repeatable without rewriting business values or manual trust", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    db.exec(schema.replace(/-- Customer actions never reuse[\s\S]*?(?=-- Cascading SQLite deletes)/, ""));
+    db.exec(`INSERT INTO companies(id,name,slug,status) VALUES(1,'Preserved','preserved','active');
+      INSERT INTO clients(id,name,email,phone,trust_state) VALUES(1,'Preserved','fixture@example.test','1234567','blocked');
+      INSERT INTO tenant_ownership VALUES('clients',1,1);
+      INSERT INTO appointments(id,identifier,client_id,status,scheduled_date,start_time,end_time) VALUES(1,'APT-99',1,'confirmed','2000-01-01','10:00','11:00');
+      INSERT INTO tenant_ownership VALUES('appointments',1,1);
+      INSERT INTO _meta VALUES('appointment_counter','99'),('appointment_prefix','APT');`);
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => String(r.name));
+    const snapshot = () => tables.map((table) => ({ table, definition: db.prepare("SELECT sql FROM sqlite_master WHERE name=?").get(table)?.sql,
+      rows: db.prepare(`SELECT * FROM "${table}"`).all() }));
+    const before = snapshot();
+    for (let pass = 0; pass < 2; pass++) {
+      db.exec(schema); db.exec(migration);
+      assert.deepEqual(snapshot(), before);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM customer_appointment_admission").get()?.n, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM customer_appointment_snapshots_v1").get()?.n, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name IN ('admit_customer_appointment_v2','admit_customer_reschedule_v1','apply_customer_appointment_v1')").get()?.n, 3);
+      assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    }
+  } finally { db.close(); }
+});
+
+test("customer trust migration backfills same-company completed history once and preserves every other value", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec(schema.replace(/^  trust_state .*\n/m, "")
+      .replace(/CREATE TRIGGER IF NOT EXISTS promote_completed_customer_v1[\s\S]*?\nEND;/, "")
+      .replace(/CREATE TRIGGER IF NOT EXISTS admit_public_customer_v2[\s\S]*?\nEND;/, "")
+      .replace(/-- Completed attendance is durable[\s\S]*?(?=-- Explicit qualifications only)/, "")
+      .replace("  customer_email TEXT,\n", ""));
+    db.exec(`INSERT INTO companies (id, name, status) VALUES (1, 'First', 'active'), (2, 'Second', 'active');
+      INSERT INTO clients (id, name, email, notes) VALUES (1, 'Completed', 'completed@example.test', 'preserve'),
+        (2, 'Pending', 'pending@example.test', 'preserve'), (3, 'Cancelled', '', 'preserve'), (4, 'Unowned history', '', 'preserve');
+      INSERT INTO tenant_ownership VALUES ('clients', 1, 1), ('clients', 2, 1), ('clients', 3, 2), ('clients', 4, 2);
+      INSERT INTO appointments (id, identifier, client_id, status) VALUES
+        (1, 'APT-1', 1, 'completed'), (2, 'APT-2', 2, 'confirmed'), (3, 'APT-3', 3, 'cancelled'), (4, 'APT-4', 4, 'completed');
+      INSERT INTO tenant_ownership VALUES ('appointments', 1, 1), ('appointments', 2, 1), ('appointments', 3, 2);`);
+    db.exec(migration);
+    const originalClients = db.prepare("SELECT * FROM clients ORDER BY id").all().map((row) => ({ ...row }));
+    const tables = [...types.filter((name) => name !== "clients"), "companies", "tenant_ownership", "_meta", "users", "auth_audit"];
+    const snapshot = () => tables.map((name) => db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all());
+    const before = snapshot();
+    db.exec(clientUpgrade(db.prepare("PRAGMA table_info(clients)").all()));
+    db.exec(admissionUpgrade(db.prepare("PRAGMA table_info(public_booking_admission)").all()));
+    db.exec(schema); db.exec(migration);
+    assert.deepEqual(db.prepare("SELECT trust_state FROM clients ORDER BY id").all().map((r) => r.trust_state), ["returning", "new", "new", "new"]);
+    assert.deepEqual(db.prepare("SELECT * FROM clients ORDER BY id").all().map(({ trust_state, ...rest }) => rest), originalClients);
+    assert.deepEqual(snapshot(), before);
+    db.exec("UPDATE clients SET trust_state = 'new' WHERE id = 1; UPDATE clients SET trust_state = 'blocked' WHERE id = 2");
+    const manual = db.prepare("SELECT * FROM clients ORDER BY id").all();
+    for (let pass = 0; pass < 2; pass++) {
+      assert.equal(clientUpgrade(db.prepare("PRAGMA table_info(clients)").all()), "");
+      assert.equal(admissionUpgrade(db.prepare("PRAGMA table_info(public_booking_admission)").all()), "");
+      db.exec(schema); db.exec(migration);
+      assert.deepEqual(db.prepare("SELECT * FROM clients ORDER BY id").all(), manual);
+      assert.deepEqual(snapshot(), before); assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    }
+    assert.throws(() => db.exec("UPDATE clients SET trust_state = 'trusted'"), /CHECK/);
+  } finally { db.close(); }
+});
 
 test("professional schema upgrades original users without rebuilding, changing existing rows or granting restrictions", () => {
   const db = new DatabaseSync(":memory:");
@@ -124,10 +219,10 @@ test("existing staff inherit after additive repeatable schedule migration withou
     db.exec(`INSERT INTO services (id, name, duration) VALUES (1, 'Explicit service', 60);
       INSERT INTO tenant_ownership VALUES ('services', 1, 1);
       INSERT INTO staff_services VALUES (1, 9, 1);`);
-    assert.throws(() => db.exec(`INSERT INTO public_booking_admission VALUES ('closed', 1, 9, 1, '2026-11-02', '10:00', '11:00')`), /public booking conflict/);
+    assert.throws(() => db.exec(`INSERT INTO public_booking_admission (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time) VALUES ('closed', 1, 9, 1, '2026-11-02', '10:00', '11:00')`), /public booking conflict/);
     db.exec("UPDATE staff SET working_hours = NULL WHERE id = 9");
-    db.exec(`INSERT INTO public_booking_admission VALUES ('inherit', 1, 9, 1, '2037-11-02', '10:00', '11:00')`);
-    assert.throws(() => db.exec(`INSERT INTO public_booking_admission VALUES ('outside', 1, 9, 1, '2026-11-02', '09:00', '10:00')`), /public booking conflict/);
+    db.exec(`INSERT INTO public_booking_admission (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time) VALUES ('inherit', 1, 9, 1, '2037-11-02', '10:00', '11:00')`);
+    assert.throws(() => db.exec(`INSERT INTO public_booking_admission (id, company_id, staff_id, service_id, scheduled_date, start_time, end_time) VALUES ('outside', 1, 9, 1, '2026-11-02', '09:00', '10:00')`), /public booking conflict/);
   } finally { db.close(); }
 });
 

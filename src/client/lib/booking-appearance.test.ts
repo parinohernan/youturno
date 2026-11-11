@@ -132,7 +132,7 @@ test("editorial booking fonts are local licensed Latin subsets and layout respon
   assert.match(css, /\.booking-appearance\s*\{[^}]*font-family: "Booking DM Sans"/);
   assert.match(css, /\.booking-appearance :is\(h1, h2, \.booking-welcome-title\)[^}]*font-family: "Booking Fraunces"/);
   assert.match(css, /@container booking \(min-width: 480px\)/);
-  assert.match(css, /@container booking \(min-width: 960px\)/);
+  assert.doesNotMatch(css, /min-width: 960px/, "wide screens reuse the narrow single-column layout");
   assert.match(css, /\.booking-service-content\s*\{[^}]*grid-template-columns: 1\.5rem minmax\(0, 1fr\)/);
   assert.match(css, /\.booking-cover\s*\{[^}]*aspect-ratio: 16 \/ 9/);
   const index = await readFile(new URL("../../../index.html", import.meta.url), "utf8");

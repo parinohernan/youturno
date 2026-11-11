@@ -9,6 +9,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "@/api";
+import { customerPolicyMessages, type CustomerPolicyCode } from "../../shared/customer-policy";
 import { contactPhone } from "../../shared/contact-phone";
 import { shiftDate, today, parseDate } from "@/lib/dates";
 import { formatDate, formatMoney } from "@/lib/format";
@@ -22,6 +23,9 @@ import { bookingHours, type ScheduledStaff } from "../lib/booking-hours";
 import { CompanyPublicDetails } from "./company-public-details";
 import { BookingPageFrame } from "./booking-page-frame";
 import { ProfessionalAvatar } from "./professional-avatar";
+import { CustomerBookings } from "./customer-bookings";
+import { BookingCalendarAction } from "./booking-calendar-action";
+import type { BookingCalendarContext } from "../lib/booking-calendar";
 import { bookingDraftKey, bookingEndTime, bookingStep, readBookingDraft, validBookingService, type BookingStep } from "../lib/booking-wizard";
 
 export interface PublicOverview {
@@ -68,9 +72,10 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [customer, setCustomer] = useState<CustomerSession | null>(null);
   const [sessionChecked, setSessionChecked] = useState(!!preview);
-  const [booked, setBooked] = useState<BookedAppointment | null>(null);
+  const [booked, setBooked] = useState<(BookedAppointment & { calendarContext: BookingCalendarContext }) | null>(null);
   const [notice, setNotice] = useState("");
   const [authFailed] = useState(() => !preview && new URLSearchParams(window.location.search).get("auth") === "failed");
+  const [finished, setFinished] = useState(() => !preview && typeof window !== "undefined" && new URLSearchParams(window.location.search).get("reserva") === "finalizada");
   const submitting = useRef(false);
   const [booking, setBooking] = useState(false);
   const [slotsVersion, setSlotsVersion] = useState(0);
@@ -78,6 +83,115 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
   const [slotsKey, setSlotsKey] = useState("");
   const [sessionError, setSessionError] = useState(false);
   const [phone, setPhone] = useState("");
+  const [eligibility, setEligibility] = useState<{ eligible: boolean; code: CustomerPolicyCode | null; message: string | null } | null>(null);
+  const [eligibilityError, setEligibilityError] = useState(false);
+  const [eligibilityVersion, setEligibilityVersion] = useState(0);
+  const eligibilityRequest = useRef(0);
+  const customerEpoch = useRef(0);
+  const customerIdentity = useRef("");
+  const logoutLock = useRef(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
+  const agendaSummary = useRef<HTMLElement>(null);
+  const agendaFocus = useRef(false);
+  const [agendaFocusVersion, setAgendaFocusVersion] = useState(0);
+  const [customerRoute, setCustomerRoute] = useState(() => {
+    if (preview || typeof window === "undefined") return "";
+    const route = new URLSearchParams(window.location.search).get("turnos") ?? "";
+    return route === "lista" || /^\d+$/.test(route) ? route : "";
+  });
+  const [agendaOpen, setAgendaOpen] = useState(!!customerRoute);
+  const [agendaMounted, setAgendaMounted] = useState(!!customerRoute);
+  const writeCustomerRoute = (route: string, replace = false) => {
+    if (preview) return;
+    const url = new URL(window.location.href);
+    if (route) url.searchParams.set("turnos", route); else url.searchParams.delete("turnos");
+    window.history[replace ? "replaceState" : "pushState"](null, "", url);
+  };
+  const customerNavigate = (route: string) => {
+    if (submitting.current || preview) return;
+    writeCustomerRoute(route);
+    if (route) { setCustomerRoute(route); setAgendaMounted(true); }
+    setAgendaOpen(!!route);
+    agendaFocus.current = true;
+    setAgendaFocusVersion((version) => version + 1);
+    if (!route && booked && !finished) customerChanged();
+  };
+  useEffect(() => {
+    if (agendaFocus.current) {
+      agendaSummary.current?.focus();
+      agendaSummary.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      agendaFocus.current = false;
+    }
+  }, [agendaOpen, customerRoute, agendaFocusVersion]);
+  useEffect(() => {
+    if (preview) return;
+    const back = () => {
+      const value = new URLSearchParams(window.location.search).get("turnos") ?? "";
+      const route = value === "lista" || /^\d+$/.test(value) ? value : "";
+      if (route) { setCustomerRoute(route); setAgendaMounted(true); }
+      setAgendaOpen(!!route);
+    };
+    window.addEventListener("popstate", back);
+    return () => window.removeEventListener("popstate", back);
+  }, [slug, preview]);
+  const customerChanged = () => {
+    setEligibility(null); setEligibilityVersion((version) => version + 1);
+    requestVersion.current++; setTime(null); setSlots([]); setSlotsKey(""); setSlotsVersion((version) => version + 1);
+    completed.current = finished; setBooked(null); setRequestedStep(2);
+  };
+  const clearCustomer = () => {
+    customerEpoch.current++; sessionVersion.current++; eligibilityRequest.current++; requestVersion.current++;
+    customerIdentity.current = "";
+    setCustomer(null); setEligibility(null); setEligibilityError(false); setSessionError(false); setSessionChecked(true);
+    setServiceId(null); setStaffId(null); setDate(null); setTime(null); setSlots([]); setSlotsKey(""); setSlotsLoading(false);
+    setPhone(""); setBooked(null); completed.current = false; setRequestedStep(2);
+    setAgendaOpen(false); setAgendaMounted(false); setCustomerRoute(""); setLogoutError("");
+    focusRequested.current = true;
+    if (!preview) {
+      writeCustomerRoute("", true);
+      try { sessionStorage.removeItem(bookingDraftKey(slug)); sessionStorage.removeItem(`yt.customer.intent:${slug}`); } catch { /* Best effort, scoped to this booking page. */ }
+    }
+  };
+  const customerExpired = () => {
+    clearCustomer();
+    setNotice("Su sesión venció. Inicie sesión con Google para continuar con sus turnos.");
+  };
+  const logout = async () => {
+    if (preview || logoutLock.current || submitting.current) return;
+    logoutLock.current = true; setLoggingOut(true); setLogoutError("");
+    // Invalidate session reads immediately, including a focus refresh already in flight.
+    sessionVersion.current++;
+    try {
+      await api("POST", "/api/auth/customer/logout", {});
+      clearCustomer(); setNotice("");
+    } catch (cause) {
+      if ((cause as { status?: number }).status === 401) customerExpired();
+      else setLogoutError("No se pudo cerrar la sesión. Revise la conexión y vuelva a intentar.");
+    } finally { logoutLock.current = false; setLoggingOut(false); }
+  };
+  useEffect(() => {
+    setEligibility(null); setEligibilityError(false);
+  }, [customer?.sub, customer?.email, slug, preview]);
+  useEffect(() => {
+    const version = ++eligibilityRequest.current;
+    if (!customer || preview || submitting.current) return;
+    api<NonNullable<typeof eligibility>>("GET", `/api/public/${slug}/eligibility`)
+      .then((value) => { if (version === eligibilityRequest.current) { setEligibility(value); setEligibilityError(false); } })
+      .catch((cause) => { if (version === eligibilityRequest.current) { setEligibility(null); if (cause.status === 401) customerExpired(); else setEligibilityError(true); } });
+    return () => { eligibilityRequest.current++; };
+  }, [customer?.sub, customer?.email, slug, eligibilityVersion, preview, agendaOpen]);
+  useEffect(() => {
+    if (!customer || preview) return;
+    const visible = () => {
+      if (document.visibilityState === "visible" && !submitting.current) setEligibilityVersion((version) => version + 1);
+    };
+    document.addEventListener("visibilitychange", visible);
+    // A denied customer may stay on this tab while the company completes a visit.
+    // Poll only this warning, quietly, while visible; never reset wizard selections.
+    const timer = eligibility?.code === "CUSTOMER_ACTIVE_LIMIT" ? window.setInterval(visible, 30_000) : null;
+    return () => { document.removeEventListener("visibilitychange", visible); if (timer !== null) window.clearInterval(timer); };
+  }, [customer?.sub, customer?.email, slug, preview, eligibility?.code]);
   useEffect(() => { setPhone(""); }, [customer?.sub]);
   const heading = useRef<HTMLHeadingElement>(null);
   const focusRequested = useRef(false);
@@ -96,13 +210,25 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
   };
   useEffect(() => {
     if (focusRequested.current) { heading.current?.focus(); focusRequested.current = false; }
-  }, [step, booked]);
+  }, [step, booked, finished]);
 
   const checkSession = async () => {
+    if (logoutLock.current) return;
     const version = ++sessionVersion.current;
     setSessionError(false);
-    try { const result = await api<{ customer: CustomerSession }>("GET", "/api/auth/customer/session"); if (version === sessionVersion.current) setCustomer(result.customer); }
-    catch (cause) { if (version === sessionVersion.current) { setCustomer(null); setSessionError((cause as { status?: number }).status !== 401); } }
+    try {
+      const result = await api<{ customer: CustomerSession }>("GET", "/api/auth/customer/session");
+      if (version === sessionVersion.current) {
+        const identity = `${result.customer.sub}:${result.customer.email}`;
+        if (customerIdentity.current && customerIdentity.current !== identity) clearCustomer();
+        customerIdentity.current = identity; setCustomer(result.customer);
+      }
+    } catch (cause) {
+      if (version === sessionVersion.current) {
+        if ((cause as { status?: number }).status === 401) { if (customerIdentity.current) customerExpired(); }
+        else setSessionError(true);
+      }
+    }
     finally { if (version === sessionVersion.current) setSessionChecked(true); }
   };
 
@@ -113,6 +239,7 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
       requestVersion.current++;
       setSlotsKey("");
       setSlotsVersion((version) => version + 1);
+      setEligibilityVersion((version) => version + 1);
       void checkSession();
       api<PublicOverview>("GET", `/api/public/${slug}/overview`).then((value) => { if (current) setOverview(value); })
         .catch((cause) => { if (current && (cause as { status?: number }).status === 404) setPhase("notfound"); });
@@ -157,6 +284,21 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
       .finally(() => { if (current) setPhase((prev) => (prev === "loading" ? "ready" : prev)); });
     void checkSession();
 
+    if (finished) {
+      try { sessionStorage.removeItem(bookingDraftKey(slug)); sessionStorage.removeItem(`yt.customer.intent:${slug}`); } catch { /* Best effort: never restore a finished wizard. */ }
+      return () => { current = false; };
+    }
+
+    try {
+      const key = `yt.customer.intent:${slug}`;
+      const intent = sessionStorage.getItem(key);
+      sessionStorage.removeItem(key);
+      if (intent && (intent === "lista" || /^\d+$/.test(intent))) {
+        const url = new URL(window.location.href); url.searchParams.set("turnos", intent);
+        window.history.replaceState(null, "", url); setCustomerRoute(intent); setAgendaOpen(true); setAgendaMounted(true);
+      }
+    } catch { /* Navigation still works when storage is unavailable. */ }
+
     try {
       const draft = readBookingDraft(sessionStorage.getItem(bookingDraftKey(slug)), today(), shiftDate(today(), 13));
       if (draft) {
@@ -177,7 +319,7 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
     const version = ++requestVersion.current;
     setSlots([]);
     setSlotsKey("");
-    if (!customer || !serviceId || !date || !validService || requestedStep < 3 || booked) { setSlotsLoading(false); return; }
+    if (!customer || !serviceId || !date || !validService || requestedStep < 3 || booked || finished) { setSlotsLoading(false); return; }
     if (preview) { setSlots(["10:00", "10:30", "11:00"]); setSlotsKey(selectionKey); setSlotsLoading(false); return; }
     const params = new URLSearchParams({ date, service_id: String(serviceId) });
     if (staffId !== null) params.set("staff_id", String(staffId));
@@ -190,12 +332,12 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
       } })
       .catch((cause) => { if (current && version === requestVersion.current) {
         setSlots([]);
-        if ((cause as { status?: number }).status === 401) { sessionVersion.current++; setSessionError(false); setCustomer(null); setNotice("Su sesión venció. Inicie sesión nuevamente para continuar."); }
+        if ((cause as { status?: number }).status === 401) customerExpired();
         else { setTime(null); setNotice("No se pudieron cargar los horarios. Vuelva a intentar o seleccione otro día."); }
       } })
       .finally(() => { if (current && version === requestVersion.current) setSlotsLoading(false); });
     return () => { current = false; };
-  }, [slug, serviceId, staffId, date, slotsVersion, overview, validService, customer, requestedStep >= 3, booked]);
+  }, [slug, serviceId, staffId, date, slotsVersion, overview, validService, customer, requestedStep >= 3, booked, finished]);
 
   const preserveDraft = () => {
     if (preview) return;
@@ -203,13 +345,44 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
     catch { /* Storage may be unavailable; booking still works without persistence. */ }
   };
   useEffect(() => {
-    if (phase === "ready" && overview && sessionChecked && !booked) preserveDraft();
-  }, [serviceId, staffId, date, time, requestedStep, phase, overview, sessionChecked, booked]);
+    if (phase === "ready" && overview && sessionChecked && !booked && !finished && (customer || serviceId !== null)) preserveDraft();
+  }, [serviceId, staffId, date, time, requestedStep, phase, overview, sessionChecked, booked, finished]);
+
+  const finishBooking = () => {
+    if (!booked || submitting.current) return;
+    // Finish only the local receipt; the appointment and customer session stay intact.
+    completed.current = true;
+    requestVersion.current++;
+    setFinished(true); setBooked(null); setRequestedStep(2);
+    setServiceId(null); setStaffId(null); setDate(null); setTime(null);
+    setSlots([]); setSlotsKey(""); setSlotsLoading(false); setPhone(""); setNotice("");
+    focusRequested.current = true;
+    if (!preview) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("reserva", "finalizada");
+      window.history.replaceState(null, "", url);
+      try { sessionStorage.removeItem(bookingDraftKey(slug)); sessionStorage.removeItem(`yt.customer.intent:${slug}`); } catch { /* Optional temporary intent only. */ }
+    }
+  };
+
+  const customerBookingNavigate = (route: string) => {
+    // Only the agenda's explicit reserve actions may start a new wizard.
+    if (!route && finished) {
+      setFinished(false); completed.current = false;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("reserva");
+      window.history.replaceState(null, "", url);
+      focusRequested.current = true;
+    }
+    customerNavigate(route);
+  };
 
   const book = async (slot: string) => {
     if (!contactPhone(phone)) { setNotice("Ingrese un teléfono de contacto válido para confirmar."); return; }
-    if (step !== 4 || !serviceId || !validService || !date || !customer || submitting.current || completed.current || !verifiedTime || slot !== time) return;
+    if (finished || logoutLock.current || (!preview && !eligibility?.eligible) || step !== 4 || !serviceId || !validService || !date || !customer || submitting.current || completed.current || !verifiedTime || slot !== time) return;
     submitting.current = true;
+    const epoch = customerEpoch.current;
+    eligibilityRequest.current++;
     setBooking(true);
     setNotice("");
     try {
@@ -218,21 +391,24 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
         "POST", `/api/public/${slug}/book`,
         { service_id: serviceId, date, start_time: slot, contact_phone: contactPhone(phone),
           ...(staffId !== null ? { staff_id: staffId } : {}) });
-      setBooked(result.appointment);
+      if (epoch !== customerEpoch.current) return;
+      setBooked({ ...result.appointment, calendarContext: { companyName: overview!.company.name,
+        serviceName: service!.name, address: overview!.company.address } });
       completed.current = true;
       focusRequested.current = true;
       setTime(null);
       setSlots([]);
       if (!preview) try { sessionStorage.removeItem(bookingDraftKey(slug)); } catch { /* best effort */ }
     } catch (cause) {
+      if (epoch !== customerEpoch.current) return;
       const status = (cause as { status?: number }).status;
-      if (status === 401) {
-        sessionVersion.current++;
-        setSessionError(false);
-        setCustomer(null);
-        focusRequested.current = true;
-        preserveDraft();
-        setNotice("Su sesión venció. Inicie sesión nuevamente para revisar y confirmar su turno.");
+      const code = (cause as { body?: { code?: CustomerPolicyCode } }).body?.code;
+      if (code === "CUSTOMER_BLOCKED" || code === "CUSTOMER_ACTIVE_LIMIT") {
+        eligibilityRequest.current++;
+        setEligibility({ eligible: false, code, message: customerPolicyMessages[code] });
+        setNotice("");
+      } else if (status === 401) {
+        customerExpired();
       } else if (status === 409 || status === 400) {
         setNotice(status === 409 ? "Ese horario ya no está disponible. Seleccione otro para continuar." : "La selección ya no está disponible. Seleccione nuevamente el servicio y el profesional.");
         focusRequested.current = true;
@@ -264,31 +440,32 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
   }
   if (!overview) return null;
 
-  // ── Success card: the only screen after a confirmed booking ──
-
-  if (booked) {
-    return (
-      <BookingPageFrame appearance={overview.company.appearance} preview={!!preview}>
-      <div className="booking-page-content mx-auto max-w-md">
+  const epoch = customerEpoch.current;
+  const sessionIsCurrent = () => customerEpoch.current === epoch;
+  const success = booked && (
+      <div className="min-w-0">
         <Card>
-          <CardContent className="booking-success flex flex-col items-center gap-3 p-8 text-center">
+          <CardContent className="booking-success flex flex-col items-center gap-3 p-5 text-center">
             <p className="booking-eyebrow">{overview.company.name}</p>
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-2xl">✓</div>
             <h1 ref={heading} tabIndex={-1} className="text-xl font-bold">{preview ? "Vista previa: turno de ejemplo" : "¡Turno confirmado!"}</h1>
             <StatusBadge status={booked.status} />
             <p className="font-mono text-lg">{booked.identifier}</p>
             <p className="text-sm text-muted-foreground">
-              {formatDate(booked.scheduled_date, "long")} &middot; {booked.start_time} a {booked.end_time}
+              {formatDate(booked.scheduled_date, "long")} &middot; {booked.start_time} a {booked.end_time} · UTC
             </p>
             {service && <p className="text-sm text-muted-foreground">{service.name}</p>}
             <p className="text-xs text-muted-foreground">{preview ? "No se creó ninguna reserva." : "Guarde este código para cualquier cambio."}</p>
+            <div className="flex w-full min-w-0 max-w-xs flex-col gap-2">
+              <Button className="h-auto min-h-11 w-full whitespace-normal" onClick={finishBooking}>Cerrar</Button>
+              <BookingCalendarAction appointment={booked} context={booked.calendarContext} preview={!!preview} />
+              {!preview && <Button variant="ghost" className="h-auto min-h-11 w-full whitespace-normal" onClick={() => customerNavigate("lista")}>Ver mis turnos</Button>}
+            </div>
             {preview && <Button onClick={() => { completed.current = false; setBooked(null); setRequestedStep(2); focusRequested.current = true; }}>Volver a la vista previa</Button>}
           </CardContent>
         </Card>
       </div>
-      </BookingPageFrame>
     );
-  }
 
   const schedule = bookingHours(overview.staff, { serviceId, staffId });
   const scheduleSubject = staffId !== null ? overview.staff.find((member) => member.id === staffId)?.name ?? "Profesional no disponible" :
@@ -316,6 +493,25 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
         </div>}
       </header>
 
+      {customer && <div className="booking-customer-identity flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b py-2 text-sm">
+        <p className="min-w-0 flex-1 [overflow-wrap:anywhere]">Hola, <span className="font-semibold">{customer.name?.trim() || "Cliente"}</span></p>
+        <Button variant="ghost" className="min-h-11 shrink-0" disabled={!!preview || loggingOut || booking} onClick={() => void logout()}>{loggingOut ? "Cerrando sesión…" : "Cerrar sesión"}</Button>
+        {logoutError && <p className="w-full" role="alert">{logoutError}</p>}
+        {sessionError && <div className="w-full space-y-2" role="alert"><p>No se pudo verificar su sesión. Revise la conexión y vuelva a intentar.</p>
+          <Button variant="outline" disabled={loggingOut} onClick={() => void checkSession()}>Reintentar verificación</Button></div>}
+      </div>}
+      {success}
+      {finished && <Card>
+        <CardContent className="booking-success flex min-w-0 flex-col items-center gap-3 p-5 text-center">
+          <p className="booking-eyebrow">{overview.company.name}</p>
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-2xl" aria-hidden="true">✓</div>
+          <h1 ref={heading} tabIndex={-1} className="text-xl font-bold">Todo listo</h1>
+          <p className="text-sm">{preview ? "Finalizó la reserva de ejemplo. No se creó ningún turno." : "Su reserva quedó confirmada."}</p>
+          <p className="text-sm text-muted-foreground">Puede cerrar esta pestaña.</p>
+          {!preview && customer && <Button variant="outline" className="h-auto min-h-11 max-w-full whitespace-normal" onClick={() => customerNavigate("lista")}>Ver mis turnos</Button>}
+        </CardContent>
+      </Card>}
+      {!booked && !finished && <>
       <nav aria-label="Progreso de la reserva" className="booking-progress">
         <ol className="flex gap-2" aria-label={`Paso ${step} de 4`}>
           {(["Ingreso", "Servicio", "Horario", "Confirmación"] as const).map((label, index) =>
@@ -330,6 +526,13 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
       {notice && (
         <div className="booking-notice booking-panel rounded-md border p-3 text-sm" role="alert">{notice}</div>
       )}
+      {customer && !preview && (eligibilityError || eligibility?.eligible === false || eligibility?.message) && <div id="booking-eligibility" className="booking-notice booking-panel space-y-3 rounded-md border p-3 text-sm" role={eligibility?.eligible ? "status" : "alert"}>
+        <p>{eligibilityError ? "No se pudo verificar si puede reservar. Vuelva a intentar antes de confirmar." : eligibility?.code === "CUSTOMER_ACTIVE_LIMIT" ? customerPolicyMessages.CUSTOMER_ACTIVE_LIMIT : eligibility?.message ?? "Verificando si puede reservar…"}</p>
+        {eligibility?.eligible === false && <>
+          <Button onClick={() => customerNavigate("lista")}>Ver mis turnos</Button>
+        </>}
+        {eligibilityError && <Button variant="outline" onClick={() => setEligibilityVersion((version) => version + 1)}>Reintentar verificación</Button>}
+      </div>}
       {authFailed && step === 1 && (
         <div className="booking-notice booking-panel rounded-md border p-3 text-sm" role="alert">
           No se pudo verificar su cuenta de Google. Vuelva a intentar con el botón de ingreso.
@@ -348,7 +551,10 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
           </div> : preview ? <Button className="booking-google h-auto min-h-11 max-w-full whitespace-normal" onClick={() => {
             setCustomer({ sub: "preview", name: "Cliente de ejemplo", email: "ejemplo@example.invalid" }); navigate(requestedStep);
           }}><span className="booking-google-symbol" aria-hidden="true">G</span>Simular ingreso con Google</Button> : overview.google_sign_in ? <Button className="booking-google h-auto min-h-11 max-w-full whitespace-normal" asChild>
-            <a href={`/api/auth/customer/google?slug=${encodeURIComponent(slug)}`} onClick={preserveDraft}><span className="booking-google-symbol" aria-hidden="true">G</span>Continuar con Google</a>
+            <a href={`/api/auth/customer/google?slug=${encodeURIComponent(slug)}`} onClick={() => {
+              preserveDraft();
+              if (customerRoute) try { sessionStorage.setItem(`yt.customer.intent:${slug}`, customerRoute); } catch { /* Optional return intent. */ }
+            }}><span className="booking-google-symbol" aria-hidden="true">G</span>Continuar con Google</a>
           </Button> : <p role="alert">El ingreso con Google aún no está configurado. Contacte a la empresa para reservar.</p>}
           <p className="text-xs">Luego podrá elegir su servicio y horario. La reserva solo se crea al confirmar el último paso.</p>
           {overview.company.phone && <p>Teléfono: {overview.company.phone}</p>}
@@ -490,11 +696,38 @@ export function BookPublic({ slug, preview }: { slug: string; preview?: PublicOv
         <p id="booking-confirm-help" aria-live="polite">{booking ? "Confirmando su turno…" : verifiedTime ? (preview ? "Vista previa: la confirmación es ficticia y no crea una reserva." : "Revise los datos. Su turno se creará solo al confirmar.") : "Verificando disponibilidad. Si el horario ya no está disponible, seleccione otro."}</p>
         <div className="booking-actions flex flex-wrap gap-2">
           <Button variant="outline" disabled={booking} onClick={() => navigate(3)}>Atrás</Button>
-          <Button disabled={booking || !verifiedTime || !contactPhone(phone)} aria-describedby="booking-confirm-help booking-phone-help" onClick={() => void book(time)}>{booking ? "Confirmando..." : "Confirmar turno"}</Button>
+          <Button disabled={booking || !verifiedTime || !contactPhone(phone) || (!preview && !eligibility?.eligible)} aria-describedby="booking-confirm-help booking-phone-help booking-eligibility" onClick={() => void book(time)}>{booking ? "Confirmando..." : "Confirmar turno"}</Button>
         </div>
       </div>}
       </fieldset>
       </section>
+      </>}
+
+      {customer && <details className="booking-business-info min-w-0" open={agendaOpen}
+        onToggle={(event) => {
+          const open = event.currentTarget.open;
+          if (open !== agendaOpen) {
+            if (preview) setAgendaOpen(open);
+            else customerNavigate(open ? customerRoute || "lista" : "");
+          }
+        }} onKeyDown={(event) => {
+          if (event.key === "Escape" && agendaOpen) { event.stopPropagation(); if (preview) setAgendaOpen(false); else customerNavigate(""); }
+        }}>
+        <summary ref={agendaSummary} className="min-h-11 cursor-pointer py-3 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.currentTarget.click(); }
+          }} onClick={(event) => {
+            // Commit the disclosure state before asynchronous eligibility renders;
+            // native toggle events arrive later and can otherwise lose keyboard input.
+            event.preventDefault();
+            if (preview) setAgendaOpen(!agendaOpen);
+            else customerNavigate(agendaOpen ? "" : customerRoute || "lista");
+          }}>Mis turnos</summary>
+        {preview ? <p className="py-3 text-sm">Vista previa · No hay turnos reales para consultar.</p> : agendaMounted &&
+          <CustomerBookings key={`${slug}:${customer.sub}:${customer.email}:${epoch}`} slug={slug} route={customerRoute || "lista"}
+            navigate={(route) => { if (sessionIsCurrent()) customerBookingNavigate(route); }} isCurrent={sessionIsCurrent}
+            onChanged={() => { if (sessionIsCurrent()) customerChanged(); }} onExpired={() => { if (sessionIsCurrent()) customerExpired(); }} />}
+      </details>}
 
       {/* Recurring working hours, not date-specific appointment availability. */}
       <details className="booking-business-info">

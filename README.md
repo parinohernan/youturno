@@ -59,6 +59,57 @@ The migration is additive and repeatable: it adds `companies` and `tenant_owners
 
 These commands support **Wrangler local D1 only**, including a VPS running that same runtime and default persistence directory. They do not support `--remote` or a different persistence location. Match the running API's database before applying. Applying `schema.sql` alone does not upgrade existing columns. For other runtimes, the operator must adapt the introspection/additive column upgrades and schema guards to that deployment's backup/migration tooling. VPS updates are the operator's responsibility.
 
+### Customer trust and first-booking limit
+
+Customer trust belongs to each company's client record, not to a global Google account. Company administrators can change **Estado del cliente** in **Clientes → client detail → Editar**; the list shows the current badge. New clients default to `new` without an extra creation step. Professionals cannot change trust.
+
+| Customer state | New public bookings |
+|---|---|
+| `new` / Nuevo | At most one active appointment across all professionals and services in that company. |
+| `returning` / Recurrente | Normal booking rules, without the first-booking quota. |
+| `blocked` / Bloqueado | Denied; existing appointments and data remain unchanged. |
+
+Active means **`booked`, `confirmed`, or `in_progress` with scheduled UTC end strictly after now**. Ongoing appointments count; appointments ending exactly now or earlier do not, without changing their status or history. Cancelling the only active appointment immediately frees the quota without changing `new`; `no_show` also frees it and does not promote. This deliberately allows retrying after an expired unresolved appointment without attendance. Existing scheduling-conflict rules are unchanged. Rescheduling the same appointment adds no quota.
+
+**Completed attendance in this company automatically makes a new customer returning**, including after a manual reset to new or unblocking to new. This is persisted, not just a public response label. Administrator and professional completion both promote atomically. Cancelled, no-show, expired unresolved and other-company history never establish attendance. **Blocked has highest priority** and is never overridden by history. Manual returning is preserved even without attendance; cancellation never demotes it.
+
+**Manual administrator bookings are an explicit override**, including blocked customers and new customers with active appointments. The booking form states this exception; it does not change trust. Blocking does not cancel appointments or prevent management of existing ones. Customers use **Ver mis turnos** in the public wizard to manage their own pending appointments, including when the first-booking limit blocks another booking. No internal customer login, OTP or automated notification was added.
+
+The authenticated `/api/public/{slug}/eligibility` route accepts no identity query and uses only the signed customer's normalized verified Google email. Anonymous overview/slots expose no customer trust, email or quota. The wizard checks eligibility before confirmation and handles authoritative `CUSTOMER_ACTIVE_LIMIT` (`409`) and `CUSTOMER_BLOCKED` (`403`) responses without calling them unavailable hours. Eligibility is advisory: the public D1 batch rechecks current trust and active appointments **before find/create and any counter/contact changes**, alongside existing staff/hours/qualification/conflict guards. Concurrent first bookings cannot each create a client and bypass the limit. Legacy duplicate normalized email files count together; any blocked matching file denies public admission. Different Google provider IDs with the same email reuse the same company identity. Multiple distinct Google email accounts can still evade this policy; it is not a per-person fraud, IP or rate-limiting guarantee.
+
+#### Upgrade an existing database before starting the new API
+
+From the actual project directory (`/home/hernan/dev/youturno/OpenSalon` locally; the operator's existing checkout on the VPS), stop only that API and preserve its `.wrangler` persistence:
+
+```bash
+pnpm migrate:local
+# Inspect the preview, then explicitly apply with a new private backup path:
+pnpm migrate:local --apply --backup /absolute/private/path/unused-customer-trust-backup.sql
+```
+
+The local-only script exports a new nonempty private backup before additive changes. It adds missing columns, replaces the old customer quota/action guards and installs shared database-clock policy views. Existing `new` clients with completed appointment history owned by that same company become `returning`, including manual resets; blocked and manual returning states remain unchanged. Only approved `new` → `returning` flags change during reconciliation: no appointment, contact or counter values are rewritten. Reruns are idempotent. Verify application-table counts and original values (allowing only these trust-flag changes), `PRAGMA foreign_key_check`, and reapply before restarting the API manually. On the VPS, the operator must run this same **local** backup/apply procedure against its persisted database after updating code; never use `--remote`, apply `schema.sql` alone, replace persistence or start the API automatically.
+
+The VPS operator must run this against the same **Wrangler local D1** persistence as their API; source deployment alone is insufficient. Do not use `--remote`, apply only `schema.sql`, replace `.wrangler`, or auto-start the API before migration. Other database runtimes require operator-adapted backup and additive migration tooling. Keep backups private; they contain customer and authentication data.
+
+### Customer self-service
+
+At `/book/{slug}`, sign in with Google once and choose **Ver mis turnos** (also available in the limit message and booking confirmation), or open the discreet **Mis turnos** disclosure. The list shows own `booked`, `confirmed` and `in_progress` appointments whose scheduled UTC end is still in the future, ordered chronologically. Ongoing appointments are visible as **En curso** and read-only; expired and terminal appointments are omitted. Links use `?turnos=lista` or `?turnos={id}` and survive refresh/back navigation. A restored login intent never submits a booking or appointment change automatically. The interactive company preview does not fetch customer appointments or perform real actions.
+
+| Action | Customer boundary |
+|---|---|
+| View | Separate signed `yt_book` Google customer session; current normalized verified email matched to client files in the active slug's company. Tenant/professional cookies grant no customer access. Minimal appointment fields only, no private notes, other clients' contacts or operational history. |
+| Cancel | Own future-start `booked`/`confirmed` appointment, explicit named confirmation. History and service links remain; the new-customer quota is freed immediately when no active appointments remain. Trust is unchanged. |
+| Reschedule | Own future-start `booked`/`confirmed` appointment; only day/start change after a separate review and confirmation. ID, staff, client, every service link, duration and price remain unchanged. No conflict override. |
+| Restricted states | Blocked customers may manage existing future-start appointments without unblocking or creating another booking. `in_progress`, ongoing and expired appointments are read-only, including direct detail/action requests. Terminal appointments cannot be changed. |
+
+Own availability excludes the appointment itself and checks current active staff, **every** service's activity/qualification, effective company/personal split hours, conflicts and the same three public scheduling modes. Multi-service moves preserve the actual whole reserved interval (including any manual duration adjustment); service-duration cadence uses that whole interval from each effective opening, not just the first service. Missing staff/services or withdrawn qualifications require company assistance rather than silently replacing them.
+
+Customer endpoints are `GET /api/public/{slug}/appointments`, `GET .../appointments/{id}`, `GET .../appointments/{id}/slots?date=YYYY-MM-DD`, and `POST .../appointments/{id}/actions`. Actions accept only `{action:"cancel",version}` or `{action:"reschedule",version,date,start_time}`. Identity/company selectors are not accepted. Mutations require the customer cookie plus same-origin JSON (the public flow's CSRF boundary); bounded strict input rejects mass assignment. Cross-company/other-customer IDs return the same `404`. Responses are not cached.
+
+The additive `customer_appointment_admission` table and `customer_appointment_snapshots_v1` view are required: **follow the local D1 stop/preview/private-backup/apply/restart migration procedure above before starting the new API**. They add no customer accounts; migration changes only the approved completed-history trust flags described above. A D1 batch inserts an ephemeral guard row, validates current ownership/status/full snapshot, original future start and current scheduling policy/conflicts, applies the action in a trigger, then deletes the guard. Cancellation versus rescheduling and competing bookings serialize without reopening or deleting the old appointment on failure. Stale state returns `409` and requires another explicit review. SQLite tests simulate serialized D1 batches; they do not establish live distributed D1 concurrency behavior.
+
+After cancellation, the wizard refreshes eligibility and clears stale selected times without a page reload. Company/professional views see the change on their normal refresh/poll cadence; there is no automatic email, SMS, WhatsApp or calendar notification. Contact links are manual. VPS migration/deployment remains the operator's responsibility; never use `--remote` or replace persistence.
+
 ### Professional portal upgrade
 
 **Migrate before starting the new API.** Use the backup/preview/apply procedure above against the same local D1 persistence used by the running API. On a VPS, the operator must stop that API, make a new private backup, apply the local migration explicitly, and restart it. Never use `--remote` or replace `.wrangler/`. Source deployment alone is not a migration.

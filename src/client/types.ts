@@ -7,6 +7,8 @@ export interface CompanyProfile {
   name: string;
   description: string;
   address: string;
+  latitude?: number | null;
+  longitude?: number | null;
   phone: string;
   public_email: string;
   website: string;
@@ -58,6 +60,7 @@ export interface AppointmentNote {
 }
 
 export interface Client {
+  trust_state: import("../shared/customer-policy").CustomerTrustState;
   id: number;
   name: string;
   email: string;

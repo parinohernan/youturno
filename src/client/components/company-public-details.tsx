@@ -11,6 +11,8 @@ export function safeWebsite(value: string | undefined): string | null {
 
 export function CompanyPublicDetails({ company, preview = false, identityOnly = false, hideLogo = false }: { company: Partial<CompanyProfile>; preview?: boolean; identityOnly?: boolean; hideLogo?: boolean }) {
   const website = safeWebsite(company.website);
+  const coordinates = company.latitude != null && company.longitude != null ? `${company.latitude},${company.longitude}` : null;
+  const locationQuery = coordinates ?? company.address;
   return <div className={`company-public-details space-y-2 text-sm${identityOnly ? " company-identity-only" : ""}`}>
     {!hideLogo && company.logo_url && (/^\/api\/public\/[a-z0-9-]+\/logo\?v=[\w-]+$/.test(company.logo_url) ||
       (preview && /^\/api\/company\/logo\?v=[\w-]+$/.test(company.logo_url))) &&
@@ -18,6 +20,15 @@ export function CompanyPublicDetails({ company, preview = false, identityOnly = 
     {!identityOnly && <>
     {company.description && <p className="whitespace-pre-line">{company.description}</p>}
     {company.address && <p className="whitespace-pre-line">Ubicación: {company.address}</p>}
+    {locationQuery && <>
+      <div className="overflow-hidden rounded-md border border-border">
+        <iframe className="h-40 w-full" loading="lazy" referrerPolicy="no-referrer-when-downgrade"
+          title={`Mapa de la ubicación de ${company.name || "la empresa"}`}
+          src={`https://www.google.com/maps?q=${encodeURIComponent(locationQuery)}&output=embed`} />
+      </div>
+      <p><a className="underline" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(locationQuery)}`}
+        target="_blank" rel="noopener noreferrer">Buscar en Maps</a></p>
+    </>}
     {company.phone && <p>Teléfono: {company.phone}</p>}
     {company.public_email && <p>Correo electrónico: {company.public_email}</p>}
     {website && <p><a className="underline" href={website} target="_blank" rel="noopener noreferrer">Sitio web de la empresa</a></p>}

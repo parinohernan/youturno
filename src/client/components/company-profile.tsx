@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { CompanyProfile, WeeklyHours } from "../types";
 import { Button } from "./ui/button";
 import { WeeklyHoursEditor, hoursError } from "./weekly-hours-editor";
+import { CompanyLocationPicker } from "./company-location-picker";
 import { safeSocialUrl, socialNetworks } from "../../shared/social-links";
 
 export function CompanyProfilePage({ refreshSession }: { refreshSession: () => Promise<void> }) {
@@ -48,8 +49,9 @@ export function CompanyProfilePage({ refreshSession }: { refreshSession: () => P
         });
         if (invalidSocial) { setNotice(`${invalidSocial.label}: use una URL http:// o https:// sin usuario ni contraseña (máximo 500 caracteres).`); return; }
         void perform(async () => {
-          const { name, description, address, phone, public_email, website, social_links } = profile;
-          await api("PUT", "/api/company/profile", { name, description, address, phone, public_email, website, social_links });
+          const { name, description, address, latitude, longitude, phone, public_email, website, social_links } = profile;
+          await api("PUT", "/api/company/profile", { name, description, address,
+            latitude: latitude ?? null, longitude: longitude ?? null, phone, public_email, website, social_links });
           await refreshSession();
         }, "Perfil guardado.");
       }}>
@@ -57,6 +59,18 @@ export function CompanyProfilePage({ refreshSession }: { refreshSession: () => P
         {field("name", "Nombre de la empresa", 120)}
         {field("description", "Descripción breve (opcional)", 500)}
         {field("address", "Dirección o ubicación (opcional)", 300)}
+        <div className="space-y-2" aria-describedby="company-location-help">
+          <p className="font-medium">Ubicación en el mapa (opcional)</p>
+          <p id="company-location-help" className="text-sm text-muted-foreground">Haga clic en el mapa para marcar la ubicación exacta del negocio. Se guarda la latitud y la longitud.</p>
+          <CompanyLocationPicker key={`${profile.latitude ?? ""},${profile.longitude ?? ""}`}
+            latitude={profile.latitude ?? null} longitude={profile.longitude ?? null} disabled={busy}
+            onChange={(latitude, longitude) => setProfile((current) => current ? { ...current, latitude, longitude } : current)} />
+          {profile.latitude != null && profile.longitude != null && <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm text-muted-foreground">Ubicación marcada: {profile.latitude.toFixed(5)}, {profile.longitude.toFixed(5)}</span>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => setProfile((current) => current ? {
+              ...current, latitude: null, longitude: null } : current)}>Quitar ubicación</Button>
+          </div>}
+        </div>
         {field("phone", "Teléfono de contacto (opcional)", 40, "tel")}
         {field("public_email", "Correo electrónico público (opcional)", 254, "email")}
         {field("website", "Sitio web: http:// o https:// (opcional)", 500, "url")}
