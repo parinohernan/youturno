@@ -142,6 +142,108 @@ const SUNDAY = "2037-11-08";
 const ownCompany1 = (db: DatabaseSync, type: string, id: number) =>
   db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES (?, ?, 1)").run(type, id);
 
+test("anonymous booking is off by default, owner-scoped and never creates a customer session", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  const body = { service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00",
+    contact_phone: "+54 (11) 5555-0100", guest_name: "Guest Name" };
+  assert.equal((await request("GET", "/api/public/acme/overview")).body.allow_unverified_bookings, false);
+  assert.equal((await request("POST", "/api/public/acme/book", { body })).status, 403);
+  assert.equal(db.prepare("SELECT count(*) n FROM clients").get()?.n, 0);
+  db.exec("INSERT INTO users (id, email, password_hash, role, company_id) VALUES (1, 'owner@example.test', 'hash', 'tenant', 1)");
+  const owner = await signToken(secret, 1, 0);
+  const headers = { cookie: `__Host-youturno=${owner.jwt}`, "x-csrf-token": owner.csrf };
+  assert.equal((await request("PUT", "/api/company/profile", { headers, body: { allow_unverified_bookings: true } })).status, 200);
+  assert.equal((await request("GET", "/api/company/profile", { headers })).body.allow_unverified_bookings, true);
+  assert.equal((await request("GET", "/api/public/acme/overview")).body.allow_unverified_bookings, true);
+  assert.equal((await request("GET", "/api/public/beauty/overview")).body.allow_unverified_bookings, false);
+  assert.equal((await request("POST", "/api/public/beauty/book", { body: { ...body, service_id: 3, staff_id: 3 } })).status, 403);
+  const created = await request("POST", "/api/public/acme/book", { body });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.deepEqual(created.cookies, []);
+  assert.equal(db.prepare("SELECT name, email, phone FROM clients").get()?.email, "");
+  assert.equal(db.prepare("SELECT phone_digits FROM unverified_booking_phones").get()?.phone_digits, "541155550100");
+  assert.equal((await request("GET", "/api/auth/customer/session")).status, 401);
+  for (const path of ["/api/public/acme/appointments", `/api/public/acme/appointments/${created.body.appointment.id}`,
+    `/api/public/acme/appointments/${created.body.appointment.id}/slots?date=${MONDAY}`])
+    assert.equal((await request("GET", path)).status, 401, path);
+  assert.equal((await request("POST", `/api/public/acme/appointments/${created.body.appointment.id}/actions`,
+    { body: { action: "cancel", version: "a".repeat(64) } })).status, 401);
+  assert.equal((await request("PUT", "/api/company/profile", { headers, body: { allow_unverified_bookings: false } })).status, 200);
+  assert.equal((await request("POST", "/api/public/acme/book", { body: { ...body, start_time: "12:00", contact_phone: "+541155550200" } })).status, 403);
+  assert.equal(db.prepare("SELECT count(*) n FROM appointments").get()?.n, 1);
+});
+
+test("anonymous phone exclusion, validation and conflicts roll back without touching existing clients", async (t) => {
+  const { db, request, synchronizeBatches, beforeNextBatch } = await twoCompanies(t);
+  db.exec("UPDATE companies SET allow_unverified_bookings = 1");
+  db.exec("INSERT INTO clients (id, name, email, phone) VALUES (90, 'Existing', 'existing@example.test', '+54 (11) 5555-9999')");
+  ownCompany1(db, "clients", 90);
+  const base = { service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00", guest_name: "Guest Name", contact_phone: "+541155550100" };
+  const book = (body: unknown) => request("POST", "/api/public/acme/book", { body });
+  for (const guest_name of ["", "X", "X".repeat(121), 123, null])
+    assert.equal((await book({ ...base, guest_name })).status, 400);
+  assert.equal((await book({ ...base, contact_phone: "555" })).status, 400);
+  assert.equal((await book({ ...base, email: "existing@example.test" })).status, 400);
+  const existing = await book({ ...base, contact_phone: "541155559999" });
+  assert.equal(existing.status, 409, JSON.stringify(existing.body));
+  assert.equal(JSON.stringify(existing.body).includes("Existing"), false);
+  assert.equal(db.prepare("SELECT name, email, phone FROM clients WHERE id = 90").get()?.phone, "+54 (11) 5555-9999");
+  assert.equal(db.prepare("SELECT count(*) n FROM clients").get()?.n, 1);
+  const first = await book(base);
+  assert.equal(first.status, 201, JSON.stringify(first.body));
+  const repeated = await book({ ...base, start_time: "12:00", contact_phone: "54 (11) 5555-0100" });
+  assert.equal(repeated.status, 409);
+  assert.equal(db.prepare("SELECT count(*) n FROM appointments").get()?.n, 1);
+  const conflict = await book({ ...base, start_time: "10:30", contact_phone: "+541155550200" });
+  assert.equal(conflict.status, 409);
+  assert.equal(db.prepare("SELECT count(*) n FROM clients").get()?.n, 2);
+  synchronizeBatches(2);
+  const races = await Promise.all(["12:00", "14:00"].map((start_time) => request("POST", "/api/public/acme/book", {
+    headers: { "cf-connecting-ip": "203.0.113.1" }, body: { ...base, start_time, contact_phone: "+541155550300" } })));
+  assert.deepEqual(races.map((r) => r.status).sort(), [201, 409]);
+  assert.equal(db.prepare("SELECT count(*) n FROM unverified_booking_phones").get()?.n, 2);
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  db.exec("UPDATE appointments SET status = 'cancelled' WHERE id = 1");
+  assert.equal((await request("POST", "/api/public/acme/book", { headers: { "cf-connecting-ip": "203.0.113.2" },
+    body: { ...base, start_time: "16:00" } })).status, 409, "cancellation does not release an unverified phone for more reservations");
+  assert.equal((await request("POST", "/api/public/beauty/book", { body: { ...base, service_id: 3, staff_id: 3, start_time: "10:00" } })).status, 201,
+    "the same contact can book in another company without reading the first company's customer");
+  beforeNextBatch(() => db.exec("UPDATE companies SET allow_unverified_bookings = 0 WHERE id = 1"));
+  assert.equal((await request("POST", "/api/public/acme/book", { headers: { "cf-connecting-ip": "203.0.113.3" },
+    body: { ...base, start_time: "16:00", contact_phone: "+541155550400" } })).status, 409,
+    "a stale enabled overview cannot book after the owner disables anonymous reservations");
+  assert.equal(db.prepare("SELECT count(*) n FROM clients WHERE phone = '+541155550400'").get()?.n, 0);
+});
+
+test("anonymous bookings stay outside Google appointment ownership even if staff edits their email", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  db.exec("UPDATE companies SET allow_unverified_bookings = 1 WHERE id = 1");
+  const created = await request("POST", "/api/public/acme/book", { body: { service_id: 1, staff_id: 1, date: MONDAY,
+    start_time: "10:00", contact_phone: "+541155550100", guest_name: "Guest Name" } });
+  assert.equal(created.status, 201);
+  const id = created.body.appointment.id;
+  db.exec("UPDATE clients SET email = 'client@example.test' WHERE id = (SELECT client_id FROM appointments WHERE id = 1)");
+  const headers = { cookie: await bookingCookie() };
+  assert.deepEqual((await request("GET", "/api/public/acme/appointments", { headers })).body.appointments, []);
+  assert.equal((await request("GET", `/api/public/acme/appointments/${id}`, { headers })).status, 404);
+  assert.equal((await request("GET", `/api/public/acme/appointments/${id}/slots?date=${MONDAY}`, { headers })).status, 404);
+  assert.equal((await request("POST", `/api/public/acme/appointments/${id}/actions`, { headers,
+    body: { action: "cancel", version: "a".repeat(64) } })).status, 404);
+});
+
+test("anonymous booking rate bounds both failed attempts and valid bookings per origin and tenant", async (t) => {
+  const { db, request } = await twoCompanies(t);
+  db.exec("UPDATE companies SET allow_unverified_bookings = 1 WHERE id = 1");
+  const base = { service_id: 1, staff_id: 1, date: MONDAY, start_time: "10:00", contact_phone: "+541155550100", guest_name: "Guest Name" };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const result = await request("POST", "/api/public/acme/book", { body: { ...base, service_id: 999 } });
+    assert.equal(result.status, 400);
+  }
+  assert.equal((await request("POST", "/api/public/acme/book", { body: base })).status, 429);
+  assert.equal(db.prepare("SELECT count(*) n FROM clients").get()?.n, 0);
+  assert.equal(db.prepare("SELECT count(*) n FROM appointments").get()?.n, 0);
+});
+
 test("public contact phone is required, unverified, normalized and private to the booked company", async (t) => {
   const { db, request } = await twoCompanies(t);
   const headers = { cookie: await bookingCookie() };

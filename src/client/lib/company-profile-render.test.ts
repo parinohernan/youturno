@@ -91,7 +91,9 @@ test("tenant profile renders editable public fields, local raster chooser and sh
     const { CompanyProfilePage } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`);
     const tree = nodes(CompanyProfilePage({ refreshSession: async () => {} }));
     const inputs = tree.filter((n) => n.type === "input");
-    assert.equal(inputs.length, 12);
+    assert.equal(inputs.length, 13);
+    assert.equal(inputs.find((n) => n.props.type === "checkbox")?.props.checked, false);
+    assert.ok(tree.includes("Permitir registros sin verificación"));
     assert.equal(inputs.find((n) => n.props.placeholder?.includes("instagram")).props.value, "https://instagram.com/example");
     assert.equal(inputs.find((n) => n.props.placeholder?.includes("facebook")).props.value, "");
     assert.ok(tree.includes("Redes sociales"));

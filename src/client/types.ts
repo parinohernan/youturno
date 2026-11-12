@@ -1,6 +1,7 @@
 export type View = "dashboard" | "calendar" | "appointments" | "clients" | "staff" | "services" | "products" | "company";
 
 export interface CompanyProfile {
+  allow_unverified_bookings?: boolean;
   appearance?: import("../shared/booking-appearance").BookingAppearance;
   cover_url?: string | null;
   social_links: import("../shared/social-links").SocialLinks;

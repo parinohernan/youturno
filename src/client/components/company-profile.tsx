@@ -49,9 +49,9 @@ export function CompanyProfilePage({ refreshSession }: { refreshSession: () => P
         });
         if (invalidSocial) { setNotice(`${invalidSocial.label}: use una URL http:// o https:// sin usuario ni contraseña (máximo 500 caracteres).`); return; }
         void perform(async () => {
-          const { name, description, address, latitude, longitude, phone, public_email, website, social_links } = profile;
+          const { name, description, address, latitude, longitude, phone, public_email, website, social_links, allow_unverified_bookings } = profile;
           await api("PUT", "/api/company/profile", { name, description, address,
-            latitude: latitude ?? null, longitude: longitude ?? null, phone, public_email, website, social_links });
+            latitude: latitude ?? null, longitude: longitude ?? null, phone, public_email, website, social_links, allow_unverified_bookings: !!allow_unverified_bookings });
           await refreshSession();
         }, "Perfil guardado.");
       }}>
@@ -74,6 +74,12 @@ export function CompanyProfilePage({ refreshSession }: { refreshSession: () => P
         {field("phone", "Teléfono de contacto (opcional)", 40, "tel")}
         {field("public_email", "Correo electrónico público (opcional)", 254, "email")}
         {field("website", "Sitio web: http:// o https:// (opcional)", 500, "url")}
+        <label className="flex items-start gap-3 rounded-md border border-input p-3">
+          <input type="checkbox" className="mt-1 h-4 w-4 accent-primary" checked={!!profile.allow_unverified_bookings} disabled={busy}
+            onChange={(event) => setProfile((current) => current ? { ...current, allow_unverified_bookings: event.currentTarget.checked } : current)} />
+          <span><span className="block font-medium">Permitir registros sin verificación</span>
+            <span className="block text-sm text-muted-foreground">Permite una nueva reserva por teléfono sin iniciar sesión. El número no se verifica: estos clientes no podrán ver, cancelar ni reprogramar turnos en línea. Los cambios se coordinan con la empresa. Desactive esta opción cuando ya no la necesite.</span></span>
+        </label>
         <fieldset className="space-y-3" aria-describedby="social-links-help" disabled={busy}>
           <legend className="text-lg font-semibold">Redes sociales</legend>
           <p id="social-links-help" className="text-sm text-muted-foreground">Enlaces públicos opcionales. Pegue la URL completa, preferentemente https://. Los ejemplos son orientativos. Deje un campo vacío para quitar su enlace.</p>

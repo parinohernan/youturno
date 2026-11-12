@@ -242,6 +242,9 @@ test("old companies schema gains booking columns repeatedly without changing exi
     assert.equal(company.name, "Preserved company");
     assert.equal(company.status, "active");
     assert.equal(company.slug, null);
+    assert.equal(company.allow_unverified_bookings, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM unverified_booking_phones").get()?.n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM unverified_booking_limits").get()?.n, 0);
     assert.deepEqual(JSON.parse(String(company.business_hours)).mon, ["09:00", "18:00"]);
     db.exec("UPDATE companies SET slug = 'preserved' WHERE id = 42");
     assert.throws(() => db.exec("INSERT INTO companies (id, name, status, slug) VALUES (43, 'Other', 'active', 'preserved')"), /UNIQUE/);

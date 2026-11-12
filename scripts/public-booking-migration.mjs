@@ -14,6 +14,7 @@ export function companyUpgrade(columns) {
     !names.has("business_hours") ? `ALTER TABLE companies ADD COLUMN business_hours TEXT NOT NULL DEFAULT '${DEFAULT_HOURS}';` : "",
     !names.has("latitude") ? "ALTER TABLE companies ADD COLUMN latitude REAL;" : "",
     !names.has("longitude") ? "ALTER TABLE companies ADD COLUMN longitude REAL;" : "",
+    !names.has("allow_unverified_bookings") ? "ALTER TABLE companies ADD COLUMN allow_unverified_bookings INTEGER NOT NULL DEFAULT 0 CHECK (allow_unverified_bookings IN (0, 1));" : "",
     ...["description", "address", "phone", "public_email", "website"].map((field) =>
       !names.has(field) ? `ALTER TABLE companies ADD COLUMN ${field} TEXT NOT NULL DEFAULT '';` : ""),
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug);",
@@ -72,6 +73,7 @@ function main() {
     console.log("Professional access adds empty professional_accounts and professional_appointment_changes tables plus atomic action guards; users and their role CHECK are not rebuilt, and no accounts or restrictions are created.");
     console.log("Professional portraits add an empty staff_photos table with owned staff/company foreign keys; existing staff use a neutral silhouette and no photos are populated.");
     console.log("Customer quota counts only pending appointments with scheduled UTC end strictly after the database clock. Ongoing appointments are read-only in self-service. Existing appointments, service links and contacts are not rewritten.");
+    console.log("Anonymous bookings default off; the upgrade adds only a company flag and empty phone/rate-limit ledgers. No existing customer data is changed.");
     console.log("Preview only. To apply: pnpm migrate:local --apply --backup /absolute/path/to/new-backup.sql (stop the dev server first).");
     return;
   }

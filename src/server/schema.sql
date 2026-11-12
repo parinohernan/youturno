@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS companies (
   website TEXT NOT NULL DEFAULT '',
   -- Weekday-to-window JSON, e.g. {"mon":["09:00","18:00"],"sun":null}.
   business_hours TEXT NOT NULL DEFAULT '{"mon":["09:00","18:00"],"tue":["09:00","18:00"],"wed":["09:00","18:00"],"thu":["09:00","18:00"],"fri":["09:00","18:00"],"sat":["09:00","18:00"],"sun":null}',
+  allow_unverified_bookings INTEGER NOT NULL DEFAULT 0 CHECK (allow_unverified_bookings IN (0, 1)),
   status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'disabled')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -208,8 +209,8 @@ SELECT co.company_id, lower(trim(c.email)) AS email,
     ON ao.resource_type = 'appointments' AND ao.resource_id = a.id AND ao.company_id = co.company_id
     WHERE a.client_id = c.id AND a.status IN ('booked', 'confirmed', 'in_progress')
       AND julianday(a.scheduled_date || ' ' || a.end_time) > julianday('now'))) AS active
-FROM clients c JOIN tenant_ownership co ON co.resource_type = 'clients' AND co.resource_id = c.id
-GROUP BY co.company_id, lower(trim(c.email));
+ FROM clients c JOIN tenant_ownership co ON co.resource_type = 'clients' AND co.resource_id = c.id
+ GROUP BY co.company_id, lower(trim(c.email));
 -- Explicit qualifications only: legacy staff deliberately receive no mappings.
 CREATE TABLE IF NOT EXISTS staff_services (
   company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
@@ -405,6 +406,20 @@ CREATE TABLE IF NOT EXISTS public_booking_admission (
   start_time TEXT NOT NULL,
   end_time TEXT NOT NULL
 );
+-- A phone is never proof of identity. This ledger only prevents repeat anonymous
+-- reservations; it cannot be exchanged for a customer session or appointment access.
+CREATE TABLE IF NOT EXISTS unverified_booking_phones (
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  phone_digits TEXT NOT NULL,
+  client_id INTEGER NOT NULL UNIQUE REFERENCES clients(id) ON DELETE CASCADE,
+  PRIMARY KEY (company_id, phone_digits)
+);
+-- Persistent, bounded hourly counters; no raw network addresses are stored.
+CREATE TABLE IF NOT EXISTS unverified_booking_limits (
+  bucket TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS admit_public_booking BEFORE INSERT ON public_booking_admission
 BEGIN
   SELECT RAISE(ABORT, 'public booking conflict') WHERE NOT EXISTS (
@@ -431,6 +446,19 @@ BEGIN
     SELECT 1 FROM public_customer_policy_v2 WHERE company_id = NEW.company_id AND email = NEW.customer_email AND blocked);
   SELECT RAISE(ABORT, 'public customer active limit') WHERE EXISTS (
     SELECT 1 FROM public_customer_policy_v2 WHERE company_id = NEW.company_id AND email = NEW.customer_email AND NOT is_returning AND active);
+END;
+CREATE TRIGGER IF NOT EXISTS reserve_unverified_phone_v1 BEFORE INSERT ON unverified_booking_phones
+BEGIN
+  SELECT RAISE(ABORT, 'unverified phone unavailable') WHERE NOT EXISTS (
+    SELECT 1 FROM companies WHERE id = NEW.company_id AND status = 'active' AND allow_unverified_bookings = 1);
+  SELECT RAISE(ABORT, 'unverified phone unavailable') WHERE EXISTS (
+    SELECT 1 FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
+    WHERE o.company_id = NEW.company_id AND replace(replace(replace(replace(replace(trim(c.phone), '+', ''), ' ', ''), '(', ''), ')', ''), '-', '') = NEW.phone_digits
+      AND c.id != NEW.client_id);
+  SELECT RAISE(ABORT, 'unverified phone unavailable') WHERE NOT EXISTS (
+    SELECT 1 FROM tenant_ownership o JOIN clients c ON c.id = o.resource_id
+    WHERE o.company_id = NEW.company_id AND o.resource_type = 'clients' AND o.resource_id = NEW.client_id
+      AND c.email = '' AND replace(c.phone, '+', '') = NEW.phone_digits);
 END;
 -- Public-only qualification guard; manual tenant bookings retain their policy.
 CREATE TRIGGER IF NOT EXISTS admit_public_booking_service_v1 BEFORE INSERT ON public_booking_admission
@@ -583,6 +611,12 @@ BEGIN
           AND so.resource_id = aps.service_id AND so.company_id = NEW.company_id)
         OR NOT EXISTS (SELECT 1 FROM tenant_ownership po WHERE po.resource_type = 'appointment_services'
           AND po.resource_id = aps.id AND po.company_id = NEW.company_id))));
+END;
+CREATE TRIGGER IF NOT EXISTS deny_unverified_customer_actions_v1 BEFORE INSERT ON customer_appointment_admission
+WHEN EXISTS (SELECT 1 FROM appointments a JOIN unverified_booking_phones u ON u.client_id = a.client_id
+  WHERE a.id = NEW.appointment_id AND u.company_id = NEW.company_id)
+BEGIN
+  SELECT RAISE(ABORT, 'customer appointment changed');
 END;
 CREATE TRIGGER IF NOT EXISTS admit_customer_reschedule_v1 BEFORE INSERT ON customer_appointment_admission
 WHEN NEW.action = 'reschedule'

@@ -105,6 +105,41 @@ test("wizard gate validates partial/legacy intent, eligibility, dates, tenant ke
   assert.equal(readBookingDraft(JSON.stringify({ date: "2020-01-01", time: "10:00", step: 4 }), "2026-11-04", "2026-11-17")!.time, null);
 });
 
+test("anonymous public wizard appears only when enabled, submits name and phone without session, and hides self-service", async () => {
+  const disabled = await harness();
+  try { await disabled.settle(); assert.ok(!disabled.find("Reservar sin verificación")); }
+  finally { disabled.cleanup(); }
+  const h = await harness({ request: async (path, init) => {
+    if (path.endsWith("/overview")) return Response.json({ ...overview, allow_unverified_bookings: true });
+    if (path.endsWith("/session")) return Response.json({ error: "No session" }, { status: 401 });
+    if (path.includes("/slots?")) return Response.json({ slots: ["10:00", "11:00"] });
+    if (path.endsWith("/book") && init?.method === "POST") return Response.json({ appointment: {
+      id: 42, identifier: "APT-FICTION", scheduled_date: today(), start_time: "10:00", end_time: "10:45", status: "confirmed" } }, { status: 201 });
+    throw new Error(`Unexpected ${path}`);
+  } });
+  try {
+    await h.settle();
+    assert.ok(h.find("Reservar sin verificación"));
+    h.click("Reservar sin verificación"); await h.settle();
+    assert.equal(h.title(), "¿Qué le gustaría reservar?");
+    assert.ok(!h.tree.some((n) => n.type === "summary" && nodes(n).includes("Mis turnos")));
+    await h.toReview();
+    const name = h.tree.find((n) => n.props?.id === "booking-guest-name");
+    assert.ok(name); (name.props.onInput ?? name.props.oninput)({ currentTarget: { value: "  Guest Name  " } }); h.draw();
+    h.click("Confirmar turno"); await h.settle();
+    assert.ok(h.tree.includes("¡Turno confirmado!")); assert.ok(h.tree.includes("Guest Name"));
+    assert.ok(!h.tree.includes("  Guest Name  "));
+    (name.props.onInput ?? name.props.oninput)({ currentTarget: { value: "Changed guest" } }); h.draw();
+    assert.ok(h.tree.includes("Guest Name")); assert.ok(!h.tree.includes("Changed guest"));
+    const post = h.calls.find((call) => call.path.endsWith("/book"));
+    assert.ok(post);
+    assert.deepEqual(JSON.parse(post.init!.body as string), { service_id: 10, date: today(), start_time: "10:00",
+      contact_phone: "+541155550100", guest_name: "Guest Name" });
+    assert.ok(!h.find("Ver mis turnos"));
+    assert.equal(h.calls.some((call) => call.path.endsWith("/eligibility")), false);
+  } finally { h.cleanup(); }
+});
+
 test("Ver mis turnos stays reachable when quota blocks confirmation and does not depend on valid service selection", async () => {
   const h = await harness({ authenticated: true, eligibility: async () => Response.json({ eligible: false, code: "CUSTOMER_ACTIVE_LIMIT", message: "Ya tiene un turno activo" }) });
   try {
@@ -457,8 +492,9 @@ test("confirmation requires valid manual contact without persisting the phone or
     h.enterPhone("+54 (11) 5555-0100"); assert.equal(h.find("Confirmar turno").props.disabled, false);
     assert.equal(h.calls.filter((call) => call.init?.method === "POST").length, 0);
     assert.ok(!h.storage.get(bookingDraftKey("fiction"))!.includes("5555"));
-    assert.ok(h.tree.includes("La empresa usará este número para contactarle manualmente sobre su turno. No se envían mensajes automáticos.") ||
-      h.tree.some((node) => node.props?.id === "booking-phone-help"));
+    const help = h.tree.find((node) => node.props?.id === "booking-phone-help");
+    assert.equal(help.props.children, "La empresa usará este número para contactarle manualmente sobre su turno. No se envían mensajes automáticos.");
+    assert.ok(!nodes(help).some((node) => typeof node === "string" && node.includes("Incluya el código de país si corresponde.")));
   } finally { h.cleanup(); }
 });
 
@@ -535,6 +571,36 @@ test("confirmation blocks same-render duplicates; 409 refreshes slots and 400 re
   }
 });
 
+test("Google confirmation snapshots the trimmed session name and never passes it to calendar or URLs", async () => {
+  let sessionName = "  <b>Cliente ficticio</b>  ";
+  const h = await harness({ authenticated: true, request: async (path, init) => Response.json(init?.method === "POST"
+    ? { appointment: { id: 7, identifier: "FICTION", status: "confirmed", scheduled_date: today(), start_time: "10:00", end_time: "10:45" } }
+    : path.endsWith("/overview") ? overview : path.endsWith("/session") ? { customer: { ...customer, name: sessionName } } : { slots: ["10:00"] }) });
+  try {
+    await h.settle(); await h.toReview(); h.click("Confirmar turno"); await h.settle();
+    assert.ok(h.tree.includes("¡Turno confirmado!")); assert.ok(h.tree.includes("<b>Cliente ficticio</b>"));
+    assert.ok(!h.tree.some((node) => node.props?.dangerouslySetInnerHTML));
+    const action = h.tree.find((node) => node.props?.appointment?.calendarContext);
+    assert.ok(!JSON.stringify(action.props.appointment).includes("Cliente ficticio"));
+    assert.ok(!JSON.stringify(action.props.context).includes("Cliente ficticio"));
+    assert.ok(!h.location.href.includes("Cliente ficticio"));
+    assert.ok(!h.tree.some((node) => node.props?.href?.includes("Cliente ficticio")));
+    sessionName = "Another fictional customer"; h.listeners.focus(); await h.settle();
+    const receipt = h.tree.find((node) => node.props?.className?.includes("booking-success"));
+    assert.ok(nodes(receipt).includes("<b>Cliente ficticio</b>")); assert.ok(!nodes(receipt).includes(sessionName));
+  } finally { h.cleanup(); }
+});
+
+test("Google confirmation uses a private fallback for an empty session name", async () => {
+  const h = await harness({ authenticated: true, request: async (path, init) => Response.json(init?.method === "POST"
+    ? { appointment: { id: 8, identifier: "FICTION", status: "confirmed", scheduled_date: today(), start_time: "10:00", end_time: "10:45" } }
+    : path.endsWith("/overview") ? overview : path.endsWith("/session") ? { customer: { ...customer, name: "   " } } : { slots: ["10:00"] }) });
+  try {
+    await h.settle(); await h.toReview(); h.click("Confirmar turno"); await h.settle();
+    assert.ok(h.tree.includes("Cliente")); assert.ok(!h.tree.includes(customer.email));
+  } finally { h.cleanup(); }
+});
+
 test("late slot response cannot replace a newer day or service selection", async () => {
   const pending: ((value: Response) => void)[] = [];
   const h = await harness({ authenticated: true, request: async (path) => {
@@ -587,6 +653,7 @@ test("fictional preview navigates all screens and success without OAuth, request
   try {
     await h.settle(); h.click("Simular ingreso con Google"); await h.toReview(); h.click("Confirmar turno"); await h.settle();
     assert.ok(h.tree.includes("Vista previa: turno de ejemplo"));
+    assert.ok(h.tree.includes("Cliente de ejemplo")); assert.ok(!h.tree.includes(customer.name));
     const calendar = h.tree.find((n) => n.props?.appointment?.calendarContext);
     assert.equal(calendar.props.preview, true); assert.equal(calendar.props.appointment.id, -1);
     assert.equal(h.calls.length, 0); assert.equal(h.storage.size, 0);

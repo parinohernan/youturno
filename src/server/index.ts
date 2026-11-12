@@ -298,10 +298,11 @@ function appBase(c: { req: { url: string }; env: Env["Bindings"] }): string | nu
 
 /** Company row bookable through `slug`, or null when unknown or not active. */
 type CompanyProfile = { id: number; name: string; slug: string; business_hours: string; social_links: string;
+  allow_unverified_bookings: number;
   description: string; address: string; latitude: number | null; longitude: number | null;
   phone: string; public_email: string; website: string; logo_revision: string | null;
   appearance_settings: string | null; cover_revision: string | null };
-const profileColumns = `id, name, slug, business_hours, description, address, latitude, longitude,
+const profileColumns = `id, name, slug, business_hours, allow_unverified_bookings, description, address, latitude, longitude,
   phone, public_email, website, social_links,
   (SELECT settings FROM company_booking_appearance WHERE company_id = companies.id) AS appearance_settings,
   (SELECT revision FROM company_booking_appearance WHERE company_id = companies.id) AS cover_revision,
@@ -337,9 +338,17 @@ async function readCustomer(c: { req: { header(name: string): string | undefined
 
 // Customer-specific routes require the customer session; overview and slots stay anonymous.
 app.use("/api/public/:slug/book", async (c, next) => {
+  try {
+    const bytes = await boundedBody(c.req.raw, 2048);
+    c.req.raw = new Request(c.req.url, { method: c.req.method, headers: c.req.raw.headers, body: new Uint8Array(bytes).buffer });
+  } catch (cause) { return c.json({ error: "Solicitud inválida" }, cause instanceof BodyTooLarge ? 413 : 400); }
   const customer = await readCustomer(c);
-  if (!customer) return c.json({ error: "Necesitás iniciar sesión para reservar" }, 401);
-  c.set("customer", customer);
+  if (!customer) {
+    const input = await c.req.json().catch(() => null);
+    if (!input || typeof input !== "object" || !Object.hasOwn(input, "guest_name"))
+      return c.json({ error: "Necesitás iniciar sesión para reservar" }, 401);
+  }
+  if (customer) c.set("customer", customer);
   return next();
 });
 app.use("/api/public/:slug/eligibility", async (c, next) => {
@@ -1964,6 +1973,7 @@ const socialUrlInput = optionalText(500).refine((value) => !value || safeSocialU
 const socialLinksInput = z.object({ instagram: socialUrlInput, facebook: socialUrlInput, tiktok: socialUrlInput,
   youtube: socialUrlInput, linkedin: socialUrlInput }).strict();
 const profileInput = z.object({
+  allow_unverified_bookings: z.boolean(),
   name: z.string().trim().min(2).max(120),
   description: optionalText(500), address: optionalText(300), phone: optionalText(40),
   public_email: optionalText(254).refine((value) => !value || z.string().email().safeParse(value).success),
@@ -1984,6 +1994,7 @@ app.get("/api/company/profile", async (c) => {
   const company = await get<CompanyProfile>(`SELECT ${profileColumns} FROM companies WHERE id = ?`, [tenant(c)]);
   if (!company) return c.json({ error: "Empresa no encontrada" }, 404);
   return c.json({ name: company.name, ...publicProfile(company), business_hours: JSON.parse(company.business_hours),
+    allow_unverified_bookings: Boolean(company.allow_unverified_bookings),
     logo_url: company.logo_revision ? `/api/company/logo?v=${encodeURIComponent(company.logo_revision)}` : null,
     cover_url: company.cover_revision ? `/api/company/cover?v=${encodeURIComponent(company.cover_revision)}` : null });
 });
@@ -2059,11 +2070,11 @@ app.put("/api/company/profile", async (c) => {
     address = COALESCE(?, address), latitude = CASE WHEN ? THEN ? ELSE latitude END,
     longitude = CASE WHEN ? THEN ? ELSE longitude END,
     phone = COALESCE(?, phone), public_email = COALESCE(?, public_email),
-    website = COALESCE(?, website), social_links = CASE WHEN ? IS NULL THEN social_links
+   website = COALESCE(?, website), allow_unverified_bookings = COALESCE(?, allow_unverified_bookings), social_links = CASE WHEN ? IS NULL THEN social_links
       WHEN ? = '{}' THEN '{}' ELSE json_patch(social_links, ?) END WHERE id = ?`,
     [p.name ?? null, p.description ?? null, p.address ?? null,
       locationPatch, p.latitude ?? null, locationPatch, p.longitude ?? null,
-      p.phone ?? null, p.public_email ?? null, p.website ?? null,
+       p.phone ?? null, p.public_email ?? null, p.website ?? null, p.allow_unverified_bookings === undefined ? null : Number(p.allow_unverified_bookings),
       socialPatch, socialPatch, socialPatch, tenant(c)]);
   return c.json({ ok: true });
 });
@@ -2181,7 +2192,7 @@ const publicOverview = createRoute({
           appearance: appearanceInput, cover_url: z.string().nullable() }),
         services: z.array(z.object({ id: z.number().int(), name: z.string(), duration: z.number().int(), price: z.number() })),
         staff: z.array(z.object({ id: z.number().int(), name: z.string(), title: z.string(), color: z.string(), photo_url: z.string().nullable(), service_ids: z.array(z.number().int()), effective_hours: BusinessHoursSchema })),
-        google_sign_in: z.boolean(),
+        google_sign_in: z.boolean(), allow_unverified_bookings: z.boolean(),
       }) } },
     },
     404: NotFoundResponse,
@@ -2215,6 +2226,7 @@ app.openapi(publicOverview, async (c) => {
         [day, windows.map((window) => [minutesToTime(window.start), minutesToTime(window.end)])])),
       service_ids: (await assignedServices(company.id, member.id)).filter((id) => services.some((service) => service.id === id)) }))),
     google_sign_in: Boolean(c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET),
+    allow_unverified_bookings: company.allow_unverified_bookings === 1,
   }, 200);
 });
 
@@ -2292,6 +2304,7 @@ const customerAppointmentScope = `FROM appointments a
   JOIN customer_appointment_snapshots_v1 v ON v.id = a.id
   LEFT JOIN staff s ON s.id = a.staff_id
   WHERE lower(trim(cl.email)) = ?
+    AND NOT EXISTS (SELECT 1 FROM unverified_booking_phones u WHERE u.client_id = cl.id)
     AND (a.staff_id IS NULL OR EXISTS (SELECT 1 FROM tenant_ownership so WHERE so.resource_type = 'staff'
       AND so.resource_id = a.staff_id AND so.company_id = ao.company_id))
     AND NOT EXISTS (SELECT 1 FROM appointment_services aps WHERE aps.appointment_id = a.id AND
@@ -2414,6 +2427,7 @@ const publicBook = createRoute({
       start_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
       staff_id: z.number().int().optional(),
       contact_phone: z.string().refine((value) => contactPhone(value) !== null, "Ingrese un teléfono de contacto válido"),
+      guest_name: z.string().trim().min(2).max(120).optional(),
     }).strict() } } },
   },
   responses: {
@@ -2426,10 +2440,11 @@ const publicBook = createRoute({
     },
     400: { description: "Unknown service or staff member for this company", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Customer sign-in required", content: { "application/json": { schema: ErrorSchema } } },
-    403: { description: "Customer cannot make new public bookings", content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal("CUSTOMER_BLOCKED") }) } } },
+    403: { description: "Customer cannot make new public bookings", content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal("CUSTOMER_BLOCKED").optional() }) } } },
     404: NotFoundResponse,
     409: { description: "Slot unavailable or new customer already has an active appointment", content: { "application/json": { schema: z.object({ error: z.string(), code: z.literal("CUSTOMER_ACTIVE_LIMIT").optional() }) } } },
     503: { description: "Booking requires D1 transactions", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "Anonymous booking rate limit", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -2437,6 +2452,27 @@ app.openapi(publicBook, async (c) => {
   const body = c.req.valid("json");
   const company = await companyBySlug(c.req.valid("param").slug);
   if (!company) return c.json({ error: "Empresa no encontrada" }, 404);
+  const customer = c.get("customer");
+  const guest = !customer && body.guest_name !== undefined;
+  if (!customer && !guest) return c.json({ error: "Necesitás iniciar sesión para reservar" }, 401);
+  if (customer && body.guest_name !== undefined) return c.json({ error: "Solicitud inválida" }, 400);
+  if (guest && company.allow_unverified_bookings !== 1) return c.json({ error: "Esta opción no está disponible" }, 403);
+  const phone = contactPhone(body.contact_phone)!;
+  const phoneDigits = phone.replace(/^\+/, "");
+  if (guest) {
+    // Persist attempts outside the booking transaction so failed reservations
+    // consume budget too. No raw network address is stored.
+    const hour = Math.floor(Date.now() / 3_600_000);
+    const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${c.env.AUTH_SECRET}:${ip}`));
+    const fingerprint = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    await run("DELETE FROM unverified_booking_limits WHERE expires_at < ?", [Math.floor(Date.now() / 1000)]);
+    for (const [bucket, limit] of [[`company:${company.id}:${hour}`, 40], [`ip:${company.id}:${fingerprint}:${hour}`, 5]] as const) {
+      const result = await run(`INSERT INTO unverified_booking_limits (bucket, attempts, expires_at) VALUES (?, 1, ?)
+        ON CONFLICT(bucket) DO UPDATE SET attempts = attempts + 1 WHERE attempts < ?`, [bucket, (hour + 2) * 3600, limit]);
+      if (!result.changes) return c.json({ error: "Intente nuevamente más tarde" }, 429);
+    }
+  }
   if (!futureBooking(body.date, body.start_time)) return c.json({ error: "La fecha y hora deben ser válidas y futuras" }, 400);
   const db = c.env.DB;
   if (!db?.batch) return c.json({ error: "Se requieren transacciones D1" }, 503);
@@ -2482,21 +2518,31 @@ app.openapi(publicBook, async (c) => {
     return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
   }
 
-  // One file per customer per company, matched on the verified email.
-  const email = c.get("customer").email.trim().toLowerCase();
+  // Google customers reuse only verified-email files; anonymous customers
+  // receive a separate email-less file guarded by the tenant's phone ledger.
+  const email = customer?.email.trim().toLowerCase() ?? null;
   // Recheck reuse inside the transaction, including concurrent bookings for the
   // same customer. Only this company's contact is updated, never a global identity.
-  const clientStatements = [
+  const clientStatements = guest ? [
+    db.prepare("INSERT INTO clients (name, email, phone, notes) VALUES (?, '', ?, '')").bind(body.guest_name!, phone),
+    db.prepare(`INSERT INTO tenant_ownership (resource_type, resource_id, company_id)
+      VALUES ('clients', last_insert_rowid(), ?)`).bind(company.id),
+    db.prepare(`INSERT INTO unverified_booking_phones (company_id, phone_digits, client_id)
+      SELECT ?, ?, c.id FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
+      WHERE o.company_id = ? AND c.email = '' AND c.phone = ? ORDER BY c.id DESC LIMIT 1`).bind(company.id, phoneDigits, company.id, phone),
+  ] : [
     db.prepare(`INSERT INTO clients (name, email, phone, notes) SELECT ?, ?, ?, '' WHERE NOT EXISTS
       (SELECT 1 FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
-        WHERE o.company_id = ? AND lower(trim(c.email)) = ?)`)
-      .bind(c.get("customer").name.trim().slice(0, 120) || email, email, contactPhone(body.contact_phone), company.id, email),
+         WHERE o.company_id = ? AND lower(trim(c.email)) = ? AND NOT EXISTS
+           (SELECT 1 FROM unverified_booking_phones u WHERE u.client_id = c.id))`)
+       .bind(customer!.name.trim().slice(0, 120) || email, email, phone, company.id, email),
     db.prepare(`INSERT INTO tenant_ownership (resource_type, resource_id, company_id)
       SELECT 'clients', last_insert_rowid(), ? WHERE changes() = 1`).bind(company.id),
     db.prepare(`UPDATE clients SET phone = ?, updated_at = datetime('now') WHERE id =
       (SELECT c.id FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
-        WHERE o.company_id = ? AND lower(trim(c.email)) = ? ORDER BY c.id LIMIT 1)`)
-      .bind(contactPhone(body.contact_phone), company.id, email),
+         WHERE o.company_id = ? AND lower(trim(c.email)) = ? AND NOT EXISTS
+           (SELECT 1 FROM unverified_booking_phones u WHERE u.client_id = c.id) ORDER BY c.id LIMIT 1)`)
+       .bind(phone, company.id, email),
   ];
   const admissionId = crypto.randomUUID();
 
@@ -2516,9 +2562,13 @@ app.openapi(publicBook, async (c) => {
     db.prepare(`INSERT INTO appointments (identifier, client_id, staff_id, status, scheduled_date, start_time, end_time, total_price, notes, is_recurring, recurrence_interval)
       VALUES (COALESCE((SELECT value FROM _meta WHERE key = 'appointment_prefix'), 'APT') || '-' ||
        (SELECT value FROM _meta WHERE key = 'appointment_counter'),
-       (SELECT c.id FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
-         WHERE o.company_id = ? AND lower(trim(c.email)) = ? ORDER BY c.id LIMIT 1), ?, 'confirmed', ?, ?, ?, ?, '', 0, '')`).bind(
-       company.id, email, staffId, body.date, body.start_time, endTime, service.price,
+        (SELECT c.id FROM clients c JOIN tenant_ownership o ON o.resource_type = 'clients' AND o.resource_id = c.id
+          WHERE o.company_id = ? AND ((? IS NOT NULL AND lower(trim(c.email)) = ?
+            AND NOT EXISTS (SELECT 1 FROM unverified_booking_phones u WHERE u.client_id = c.id))
+            OR (? IS NULL AND EXISTS (SELECT 1 FROM unverified_booking_phones u
+              WHERE u.company_id = o.company_id AND u.client_id = c.id AND u.phone_digits = ?)))
+          ORDER BY c.id LIMIT 1), ?, 'confirmed', ?, ?, ?, ?, '', 0, '')`).bind(
+        company.id, email, email, email, phoneDigits, staffId, body.date, body.start_time, endTime, service.price,
     ),
     db.prepare("INSERT INTO tenant_ownership (resource_type, resource_id, company_id) VALUES ('appointments', last_insert_rowid(), ?)").bind(company.id),
     db.prepare(`INSERT INTO appointment_services (appointment_id, service_id, price, duration)
@@ -2530,6 +2580,8 @@ app.openapi(publicBook, async (c) => {
     db.prepare("DELETE FROM public_booking_admission WHERE id = ?").bind(admissionId),
   ]);
   } catch (cause) {
+    if (guest && (String(cause).includes("unverified phone unavailable") || String(cause).includes("UNIQUE constraint failed: unverified_booking_phones")))
+      return c.json({ error: "No se pudo completar la reserva con estos datos. Contacte a la empresa." }, 409);
     if (String(cause).includes("public customer blocked")) return c.json({ error: customerPolicyMessages.CUSTOMER_BLOCKED, code: "CUSTOMER_BLOCKED" }, 403);
     if (String(cause).includes("public customer active limit")) return c.json({ error: customerPolicyMessages.CUSTOMER_ACTIVE_LIMIT, code: "CUSTOMER_ACTIVE_LIMIT" }, 409);
     if (String(cause).includes("public booking conflict")) return c.json({ error: "El horario ya no está disponible. Actualiza los horarios y elige otro." }, 409);
